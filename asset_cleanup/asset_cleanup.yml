@@ -1,0 +1,50 @@
+# kometa_asset_cleanup.yml
+# Configuration for kometa_asset_cleanup.py
+
+# ── Safety ────────────────────────────────────────────────────────────────
+# Set to false only when you're happy with what a dry run reports.
+dry_run: true
+
+# Also delete entries that have no ID tag and aren't in Plex.
+# These are shown as warnings in a normal run. Use with caution —
+# add anything you want to keep permanently to the ignore list below.
+delete_unknown: false
+
+# Extra logging (shows individual API responses and skipped entries).
+verbose: false
+
+# ── Directories to scan ────────────────────────────────────────────────────
+# Only the TOP LEVEL of each directory is scanned; sub-folders inside an
+# asset folder (e.g. Season posters) are treated as part of that asset.
+asset_dirs:
+  - /mnt/user/appdata/kometa/assets
+  - /mnt/user/appdata/kometa/assets/tmp
+
+# ── Radarr ────────────────────────────────────────────────────────────────
+radarr:
+  url: http://localhost:7878
+  api_key: YOUR_RADARR_API_KEY
+
+# ── Sonarr ────────────────────────────────────────────────────────────────
+sonarr:
+  url: http://localhost:8989
+  api_key: YOUR_SONARR_API_KEY
+
+# ── Plex ──────────────────────────────────────────────────────────────────
+plex:
+  url: http://localhost:32400
+  token: YOUR_PLEX_TOKEN
+
+# ── Ignore list ───────────────────────────────────────────────────────────
+# Asset names to silently skip — not deleted, not shown as warnings.
+# No file extension needed; "Poster" matches "Poster.png" and "Poster" folders.
+# Matching is case-insensitive and punctuation-insensitive.
+ignore:
+  # - Marvel Studios
+  # - My Custom Collection
+  # - Some Overlay Folder
+
+
+discord:
+  webhook_url: ""        # leave blank to disable
+  notify_on_dry_run: true

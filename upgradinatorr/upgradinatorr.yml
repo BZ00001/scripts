@@ -1,0 +1,68 @@
+# upgradinatorr.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# Global settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+dry_run: true           # Set true to log actions without touching anything
+log_level: INFO         # DEBUG | INFO | WARNING | ERROR
+
+# Discord webhook URL for run notifications (optional).
+# Only sends a message when items were actually searched.
+# Leave commented out or empty to disable.
+# discord_webhook: https://discord.com/api/webhooks/YOUR_WEBHOOK_URL
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instances
+# Define one entry per Radarr / Sonarr instance you want to manage.
+# ─────────────────────────────────────────────────────────────────────────────
+
+instances:
+
+  - name: Radarr
+    type: radarr
+    url: http://192.168.1.200:7878            # or http://192.168.1.x:7878
+    api_key: YOUR_API_KEY
+    count: 5                                  # how many movies to search per run
+    tag_name: checked                         # tag applied after a search is triggered
+    ignore_tag: upgr-ignore                   # movies with this tag are always skipped (optional)
+    unattended: true                          # if true, clears tags when all items are processed
+                                              # so the cycle starts over automatically
+    wait_for_commands: false                  # if true, the script waits (concurrently) for each
+                                              # Arr search command to finish before tagging the item;
+                                              # rarely needed — Arr queues the search internally the
+                                              # moment the command is accepted, so false is faster
+                                              # and still correct in virtually all cases
+    command_timeout: 60                       # seconds to wait for a search command to complete
+                                              # before giving up and moving on; only relevant when
+                                              # wait_for_commands is true (default: 60)
+    history_check_delay: 15                   # base seconds to wait after command completion before
+                                              # checking grab history — only relevant when
+                                              # wait_for_commands is true (default: 15)
+    history_check_delay_per_item: 10          # additional seconds per searched item added to the
+                                              # base delay above; e.g. 2 movies = 15 + 20 = 35s,
+                                              # 5 shows = 15 + 50 = 65s — scales with search load
+                                              # only relevant when wait_for_commands is true (default: 10)
+
+  - name: Sonarr
+    type: sonarr
+    url: http://192.168.1.200:8989
+    api_key: YOUR_API_KEY
+    count: 5                                  # how many series to search per run
+    tag_name: checked
+    ignore_tag: upgr-ignore
+    unattended: true
+    season_monitored_threshold: 50            # skip seasons where fewer than this % of
+                                              # episodes are monitored (0–100, default 1)
+    wait_for_commands: false                  # see Radarr instance above for full explanation
+    command_timeout: 60                       # see Radarr instance above for full explanation
+    history_check_delay: 15                   # see Radarr instance above for full explanation
+    history_check_delay_per_item: 10          # see Radarr instance above for full explanation
+
+  # Add more instances here if you have multiple Radarr/Sonarr instances:
+  # - name: Radarr4K
+  #   type: radarr
+  #   url: http://radarr4k:7878
+  #   api_key: YOUR_KEY
+  #   count: 1
+  #   tag_name: checked
+  #   unattended: true

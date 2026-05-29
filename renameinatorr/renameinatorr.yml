@@ -1,0 +1,82 @@
+# renameinatorr.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# Global settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Set to true to log what would be renamed without making any changes.
+# Folder renames that would occur are also shown in dry-run mode.
+dry_run: true
+
+# Log verbosity: DEBUG | INFO | WARNING | ERROR
+log_level: INFO
+
+# Discord webhook URL for rename notifications (optional).
+# A message is only sent when something was actually renamed.
+# Leave commented out or empty to disable.
+# discord_webhook: https://discord.com/api/webhooks/YOUR_WEBHOOK_URL
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instances
+# Define one entry per Radarr / Sonarr instance you want to manage.
+# ─────────────────────────────────────────────────────────────────────────────
+instances:
+
+  - name: Radarr
+    type: radarr                          # radarr | sonarr
+    url: http://192.168.1.200:7878
+    api_key: YOUR_API_KEY
+
+    # Number of items to process per run.
+    # Combined with enable_batching this controls how quickly you work through
+    # the library. Set to 0 to process everything in one run.
+    count: 5
+
+    # Tag applied to every item after it has been processed. Items with this
+    # tag are skipped on subsequent runs. Once all items are tagged the tag is
+    # cleared and the cycle starts over, catching any renames that have become
+    # necessary since the last full pass.
+    tag_name: renamed
+
+    # Items with this tag are always skipped, even after a cycle reset.
+    # Useful for items you never want auto-renamed. (optional)
+    ignore_tag: rename-ignore
+
+    # Rename the containing folder to match the naming format configured in
+    # Radarr / Sonarr. The format is read live from the app on every run,
+    # so changes to the format in the app are picked up automatically.
+    rename_folders: true
+
+    # When false (default): processes `count` items per run, advancing through
+    # the library gradually across scheduled runs.
+    # When true: processes the entire library in one run, using `count` as the
+    # chunk size. Set count to 0 to process everything in a single chunk.
+    enable_batching: false
+
+    # Restrict processing to items whose title contains this string
+    # (case-insensitive substring match). Useful for testing a single item
+    # before running against the full library. Comment out or leave empty
+    # to process all items.
+    # title_filter: "Some Movie"
+
+  - name: Sonarr
+    type: sonarr
+    url: http://192.168.1.200:8989
+    api_key: YOUR_API_KEY
+    count: 15
+    tag_name: renamed
+    ignore_tag: rename-ignore
+    rename_folders: true
+    enable_batching: false
+    # title_filter: "Some Show"
+
+  # Example: second Radarr instance (4K library)
+  # - name: Radarr4K
+  #   type: radarr
+  #   url: http://192.168.1.200:7879
+  #   api_key: YOUR_API_KEY
+  #   count: 5
+  #   tag_name: renamed
+  #   ignore_tag: rename-ignore
+  #   rename_folders: true
+  #   enable_batching: false
+  #   # title_filter: "Some Movie"
