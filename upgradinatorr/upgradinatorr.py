@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# version: 1.1
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Credits
 # ─────────────────────────────────────────────────────────────────────────────
@@ -356,6 +358,8 @@ class ArrClient:
         seen: set = set()
         for r in data.get("records", []):
             if r.get("eventType") != "grabbed":
+                continue
+            if r.get(id_key) != media_id:
                 continue
             date_str = r.get("date", "")
             try:

@@ -5,7 +5,7 @@
 
 # Set to true to log what would be renamed without making any changes.
 # Folder renames that would occur are also shown in dry-run mode.
-dry_run: true
+dry_run: false
 
 # Log verbosity: DEBUG | INFO | WARNING | ERROR
 log_level: INFO
@@ -44,6 +44,9 @@ instances:
     # Rename the containing folder to match the naming format configured in
     # Radarr / Sonarr. The format is read live from the app on every run,
     # so changes to the format in the app are picked up automatically.
+    # Note: in dry-run mode only the number of items submitted is shown —
+    # the app itself determines which folders actually need renaming, so
+    # a per-item preview is not available.
     rename_folders: true
 
     # When false (default): processes `count` items per run, advancing through

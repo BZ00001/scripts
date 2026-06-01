@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+# version: 1.1
+
 """
 asset_cleanup.py
 Removes Kometa asset folders/files that have no matching entry in
@@ -7,6 +10,7 @@ Radarr (TMDB), Sonarr (TVDB), or Plex collections.
 Config: asset_cleanup.yml (same directory as this script)
 """
 
+import os
 import re
 import sys
 import shutil
@@ -32,6 +36,7 @@ YELLOW = "\033[93m" if _IS_TTY else ""
 CYAN   = "\033[96m" if _IS_TTY else ""
 DIM    = "\033[2m"  if _IS_TTY else ""
 
+
 class ColourFormatter(logging.Formatter):
     COLOURS = {
         logging.DEBUG:    DIM,
@@ -40,19 +45,23 @@ class ColourFormatter(logging.Formatter):
         logging.ERROR:    RED,
         logging.CRITICAL: RED + BOLD,
     }
+
     def format(self, record):
         colour = self.COLOURS.get(record.levelno, RESET)
         msg = super().format(record)
         return f"{colour}{msg}{RESET}" if _IS_TTY else msg
 
+
 def setup_logging(verbose: bool = False) -> logging.Logger:
     logger = logging.getLogger("asset_cleanup")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(ColourFormatter("%(asctime)s  %(levelname)-8s  %(message)s",
-                                         datefmt="%H:%M:%S"))
+    handler.setFormatter(ColourFormatter(
+        "%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S"
+    ))
     logger.addHandler(handler)
     return logger
+
 
 log = setup_logging()
 
@@ -65,15 +74,16 @@ DEFAULT_CONFIG = {
     "dry_run": True,
     "delete_unknown": False,
     "verbose": False,
+    # List primary asset dirs only — tmp subdirs are checked automatically.
     "asset_dirs": [
         "/mnt/user/appdata/kometa/assets",
-        "/mnt/user/appdata/kometa/assets/tmp",
     ],
-    "radarr":  {"url": "http://localhost:7878", "api_key": "YOUR_RADARR_API_KEY"},
-    "sonarr":  {"url": "http://localhost:8989", "api_key": "YOUR_SONARR_API_KEY"},
-    "plex":    {"url": "http://localhost:32400", "token": "YOUR_PLEX_TOKEN"},
+    "radarr": [{"name": "Radarr", "url": "http://localhost:7878", "api_key": "YOUR_RADARR_API_KEY"}],
+    "sonarr": [{"name": "Sonarr", "url": "http://localhost:8989", "api_key": "YOUR_SONARR_API_KEY"}],
+    "plex":   {"url": "http://localhost:32400", "token": "YOUR_PLEX_TOKEN"},
     "discord": {"webhook_url": "", "notify_on_dry_run": True},
 }
+
 
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
@@ -97,6 +107,7 @@ def _normalise_name(name: str) -> str:
     name = re.sub(r"\s+", " ", name).strip()
     return name
 
+
 def _entry_size(path: Path) -> str:
     """Human-readable size of a file or directory."""
     try:
@@ -114,34 +125,53 @@ def _entry_size(path: Path) -> str:
 
 # ─── API helpers ────────────────────────────────────────────────────────────
 
-def get_radarr_data(url: str, api_key: str) -> tuple[set[int], set[str]]:
-    """Return (tmdb_ids, normalised_titles) for all movies in Radarr."""
-    resp = requests.get(
-        f"{url.rstrip('/')}/api/v3/movie",
-        headers={"X-Api-Key": api_key},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    movies = resp.json()
-    ids    = {m["tmdbId"] for m in movies if m.get("tmdbId")}
-    titles = {_normalise_name(m["title"]) for m in movies if m.get("title")}
-    log.info(f"Radarr: {len(ids):,} movies loaded")
-    return ids, titles
+def _normalise_instances(cfg_value) -> list[dict]:
+    """Accept either a single instance dict or a list of instance dicts."""
+    if isinstance(cfg_value, dict):
+        return [cfg_value]
+    return cfg_value or []
 
 
-def get_sonarr_data(url: str, api_key: str) -> tuple[set[int], set[str]]:
-    """Return (tvdb_ids, normalised_titles) for all series in Sonarr."""
-    resp = requests.get(
-        f"{url.rstrip('/')}/api/v3/series",
-        headers={"X-Api-Key": api_key},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    series = resp.json()
-    ids    = {s["tvdbId"] for s in series if s.get("tvdbId")}
-    titles = {_normalise_name(s["title"]) for s in series if s.get("title")}
-    log.info(f"Sonarr: {len(ids):,} series loaded")
-    return ids, titles
+def get_radarr_data(instances: list[dict]) -> tuple[set[int], set[str]]:
+    """Return combined (tmdb_ids, normalised_titles) across all Radarr instances."""
+    all_ids:    set[int] = set()
+    all_titles: set[str] = set()
+    for inst in instances:
+        name    = inst.get("name", inst["url"])
+        resp    = requests.get(
+            f"{inst['url'].rstrip('/')}/api/v3/movie",
+            headers={"X-Api-Key": inst["api_key"]},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        movies = resp.json()
+        ids    = {m["tmdbId"] for m in movies if m.get("tmdbId")}
+        titles = {_normalise_name(m["title"]) for m in movies if m.get("title")}
+        all_ids    |= ids
+        all_titles |= titles
+        log.info(f"Radarr [{name}]: {len(ids):,} movies loaded")
+    return all_ids, all_titles
+
+
+def get_sonarr_data(instances: list[dict]) -> tuple[set[int], set[str]]:
+    """Return combined (tvdb_ids, normalised_titles) across all Sonarr instances."""
+    all_ids:    set[int] = set()
+    all_titles: set[str] = set()
+    for inst in instances:
+        name = inst.get("name", inst["url"])
+        resp = requests.get(
+            f"{inst['url'].rstrip('/')}/api/v3/series",
+            headers={"X-Api-Key": inst["api_key"]},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        series = resp.json()
+        ids    = {s["tvdbId"] for s in series if s.get("tvdbId")}
+        titles = {_normalise_name(s["title"]) for s in series if s.get("title")}
+        all_ids    |= ids
+        all_titles |= titles
+        log.info(f"Sonarr [{name}]: {len(ids):,} series loaded")
+    return all_ids, all_titles
 
 
 def get_plex_collection_names(url: str, token: str) -> set[str]:
@@ -193,11 +223,11 @@ def _extract_title(name: str) -> str:
 def classify_entry(name: str) -> tuple[str, int | None]:
     """
     Returns one of:
-      ('tmdb', id)            — resolved TMDB ID
-      ('tvdb', id)            — resolved TVDB ID
+      ('tmdb', id)              — resolved TMDB ID
+      ('tvdb', id)              — resolved TVDB ID
       ('tmdb_unresolved', None) — Kometa placeholder {tmdb-{TmdbId}}
       ('tvdb_unresolved', None) — Kometa placeholder {tvdb-{TvdbId}}
-      ('collection', None)    — no ID tag at all
+      ('collection', None)      — no ID tag at all
     """
     m = RE_TMDB.search(name)
     if m:
@@ -230,11 +260,15 @@ def scan_asset_dir(
     """
     Scan one asset directory (top level only).
 
+    Matching priority per entry:
+      1. Ignore list → silently kept
+      2. Resolved ID tag → matched against Radarr/Sonarr by ID
+      3. ID not found → title fallback against Radarr/Sonarr titles
+      4. Unresolved placeholder ({tvdb-{TvdbId}}) → title fallback
+      5. No ID tag → matched against Plex collections by name
+      6. Nothing matched → unknown (kept + warned, or deleted if delete_unknown)
+
     Returns (keep, remove, unknown, ignored).
-      keep    — matched in Radarr, Sonarr or Plex
-      remove  — has an ID tag but no match in the relevant app
-      unknown — no ID tag, not in Plex, not ignored (kept, flagged for review)
-      ignored — explicitly listed in the ignore config (kept silently)
     """
     keep:    list[Path] = []
     remove:  list[Path] = []
@@ -253,7 +287,7 @@ def scan_asset_dir(
             log.debug(f"  Skipping nested scan dir: {name}")
             continue
 
-        # Check ignore list first (strip extension for bare-file matches)
+        # ── 1. Ignore list ───────────────────────────────────────────────────
         name_stem = Path(name).stem if entry.is_file() else name
         if _normalise_name(name_stem) in ignore_set:
             ignored.append(entry)
@@ -261,57 +295,127 @@ def scan_asset_dir(
             continue
 
         kind, eid = classify_entry(name)
+        title = _extract_title(name)
 
         if kind == "tmdb":
-            (keep if eid in radarr_ids else remove).append(entry)
+            # ── 2. Resolved TMDB ID ──────────────────────────────────────────
+            if eid in radarr_ids:
+                keep.append(entry)
+            # ── 3. ID miss → title fallback ──────────────────────────────────
+            elif title in radarr_titles:
+                keep.append(entry)
+                log.debug(f"  Kept by title fallback (Radarr): {name}")
+            else:
+                remove.append(entry)
 
         elif kind == "tvdb":
-            (keep if eid in sonarr_ids else remove).append(entry)
+            # ── 2. Resolved TVDB ID ──────────────────────────────────────────
+            if eid in sonarr_ids:
+                keep.append(entry)
+            # ── 3. ID miss → title fallback ──────────────────────────────────
+            elif title in sonarr_titles:
+                keep.append(entry)
+                log.debug(f"  Kept by title fallback (Sonarr): {name}")
+            else:
+                remove.append(entry)
 
         elif kind == "tmdb_unresolved":
-            # Kometa didn't fill in the ID — fall back to title matching
-            title = _extract_title(name)
+            # ── 4. Unresolved placeholder → title fallback ───────────────────
             if title in radarr_titles:
                 keep.append(entry)
-                log.debug(f"  Matched by title (Radarr): {name}")
+                log.debug(f"  Kept by title fallback (Radarr, unresolved ID): {name}")
             else:
-                # Can't determine origin reliably → treat as unknown
                 unknown.append(entry)
 
         elif kind == "tvdb_unresolved":
-            # Kometa didn't fill in the ID — fall back to title matching
-            title = _extract_title(name)
+            # ── 4. Unresolved placeholder → title fallback ───────────────────
             if title in sonarr_titles:
                 keep.append(entry)
-                log.debug(f"  Matched by title (Sonarr): {name}")
+                log.debug(f"  Kept by title fallback (Sonarr, unresolved ID): {name}")
             else:
                 unknown.append(entry)
 
-        else:  # plain collection name
+        else:
+            # ── 5. No ID tag → Plex collection, then Sonarr/Radarr title ─────
             normalised = _normalise_name(name)
-            (keep if normalised in plex_names else unknown).append(entry)
+            if normalised in plex_names:
+                keep.append(entry)
+            elif title in sonarr_titles:
+                keep.append(entry)
+                log.debug(f"  Kept by title fallback (Sonarr, no ID tag): {name}")
+            elif title in radarr_titles:
+                keep.append(entry)
+                log.debug(f"  Kept by title fallback (Radarr, no ID tag): {name}")
+            else:
+                unknown.append(entry)
 
     return keep, remove, unknown, ignored
 
-# ─── Deletion ───────────────────────────────────────────────────────────────
+
+def find_tmp_companion(path: Path) -> Path | None:
+    """
+    Return the matching entry in the sibling tmp/ dir if it exists,
+    otherwise None.  e.g. assets/Show (2024)/ → assets/tmp/Show (2024)/
+    """
+    companion = path.parent / "tmp" / path.name
+    return companion if companion.exists() else None
+
+# ─── Deletion ────────────────────────────────────────────────────────────────
 
 def delete_entry(path: Path, dry_run: bool) -> bool:
+    """Delete a file or directory tree. Returns True on success."""
     try:
         if not dry_run:
             if path.is_dir():
                 shutil.rmtree(path)
             else:
                 path.unlink()
+                # Remove parent folder if it is now empty
+                parent = path.parent
+                if parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    log.debug(f"Removed empty parent: {parent}")
         return True
     except Exception as exc:
         log.error(f"Failed to delete {path}: {exc}")
         return False
 
-# ─── Discord ────────────────────────────────────────────────────────────────
 
-def send_discord(webhook_url: str, dry_run: bool, delete_unknown: bool,
-                 per_dir: list[dict],
-                 all_remove: list[Path], all_unknown: list[Path]) -> None:
+def sweep_empty_dirs(asset_dirs: list[Path], skip_dirs: set[Path], dry_run: bool) -> int:
+    """
+    Walk all asset dirs bottom-up and remove any empty directories,
+    skipping dirs that are themselves configured scan targets.
+    Returns count of removed dirs.
+    """
+    removed = 0
+    for asset_dir in asset_dirs:
+        if not asset_dir.exists():
+            continue
+        for root, dirs, files in os.walk(asset_dir, topdown=False):
+            for dir_name in dirs:
+                dir_path = Path(root) / dir_name
+                if dir_path.resolve() in skip_dirs:
+                    continue
+                try:
+                    if not any(dir_path.iterdir()):
+                        log.info(f"  Removing empty folder: {dir_path.name}")
+                        if not dry_run:
+                            dir_path.rmdir()
+                        removed += 1
+                except Exception as exc:
+                    log.error(f"Failed to remove empty folder {dir_path}: {exc}")
+    return removed
+
+# ─── Discord ─────────────────────────────────────────────────────────────────
+
+def send_discord(
+    webhook_url: str,
+    dry_run: bool,
+    delete_unknown: bool,
+    per_dir: list[dict],
+    all_remove: list[Path],
+    all_unknown: list[Path],
+) -> None:
     if not webhook_url:
         return
 
@@ -325,36 +429,44 @@ def send_discord(webhook_url: str, dry_run: bool, delete_unknown: bool,
             lines.append(f"… and {len(paths) - limit} more")
         return "\n".join(lines) or "—"
 
+    unknown_label = (
+        "would remove" if delete_unknown and dry_run
+        else "removed" if delete_unknown
+        else "kept"
+    )
+
     fields = [
-        {"name": f"{action} (orphaned)", "value": str(len(all_remove)),   "inline": True},
-        {"name": "⚠️ Unknown (" + ("would remove" if delete_unknown and dry_run else "removed" if delete_unknown else "kept") + ")",
-         "value": str(len(all_unknown)), "inline": True},
+        {"name": f"{action} (orphaned)", "value": str(len(all_remove)), "inline": True},
+        {"name": f"⚠️ Unknown ({unknown_label})", "value": str(len(all_unknown)), "inline": True},
     ]
 
-    # Per-directory breakdown
     for d in per_dir:
-        label    = d["label"]
         removed  = d["remove"]
         unknown  = d["unknown"]
+        tmp_companions = d.get("tmp_companions", [])
         if not removed and not unknown:
             continue
         lines = []
         for p in removed[:10]:
-            lines.append(f"✗ {p.name}")
+            suffix = " + tmp" if any(c.name == p.name for c in tmp_companions) else ""
+            lines.append(f"✗ {p.name}{suffix}")
         for p in (unknown if delete_unknown else [])[:5]:
             lines.append(f"✗ {p.name} (unknown)")
         for p in (unknown if not delete_unknown else [])[:5]:
             lines.append(f"? {p.name} (unknown)")
-        extra_r = max(0, len(removed) - 10)
-        extra_u = max(0, len(unknown) - 5)
-        if extra_r or extra_u:
-            lines.append(f"… and {extra_r + extra_u} more")
+        extra = max(0, len(removed) - 10) + max(0, len(unknown) - 5)
+        if extra:
+            lines.append(f"… and {extra} more")
         if lines:
-            fields.append({"name": f"📁 [{label}]", "value": "\n".join(lines), "inline": False})
+            fields.append({
+                "name": f"📁 [{d['label']}]",
+                "value": "\n".join(lines),
+                "inline": False,
+            })
 
     payload = {
         "embeds": [{
-            "title": f"Kometa Asset Cleanup  {mode}",
+            "title": f"Asset Cleanup  {mode}",
             "color": colour,
             "fields": fields,
             "footer": {"text": datetime.now().strftime("%Y-%m-%d %H:%M")},
@@ -370,16 +482,19 @@ def send_discord(webhook_url: str, dry_run: bool, delete_unknown: bool,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Remove orphaned Kometa asset folders.")
-    parser.add_argument("--dry-run",    action="store_true",  help="Show what would be removed (default from config).")
-    parser.add_argument("--no-dry-run", dest="dry_run", action="store_false", help="Actually delete orphaned assets.")
-    parser.add_argument("--delete-unknown", dest="delete_unknown", action="store_true", default=None,
+    parser.add_argument("--dry-run",    action="store_true",
+                        help="Show what would be removed (default from config).")
+    parser.add_argument("--no-dry-run", dest="dry_run", action="store_false",
+                        help="Actually delete orphaned assets.")
+    parser.add_argument("--delete-unknown", dest="delete_unknown", action="store_true",
+                        default=None,
                         help="Also delete unknown entries (no ID tag, not in Plex).")
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.set_defaults(dry_run=None, delete_unknown=None)
     args = parser.parse_args()
 
-    cfg     = load_config()
-    dry_run        = cfg.get("dry_run", True) if args.dry_run is None else args.dry_run
+    cfg            = load_config()
+    dry_run        = cfg.get("dry_run", True)        if args.dry_run        is None else args.dry_run
     delete_unknown = cfg.get("delete_unknown", False) if args.delete_unknown is None else args.delete_unknown
     verbose        = cfg.get("verbose", False) or args.verbose
 
@@ -387,17 +502,17 @@ def main() -> None:
         log.setLevel(logging.DEBUG)
 
     # ── Banner ──────────────────────────────────────────────────────────────
-    mode_label = f"{YELLOW}{BOLD}DRY RUN{RESET}" if dry_run else f"{RED}{BOLD}LIVE MODE — files will be deleted{RESET}"
-    print(f"\n{CYAN}{BOLD}{'─'*60}{RESET}")
+    mode_label    = f"{YELLOW}{BOLD}DRY RUN{RESET}" if dry_run else f"{RED}{BOLD}LIVE MODE — files will be deleted{RESET}"
     unknown_label = f"  {YELLOW}(+unknown entries){RESET}" if delete_unknown else ""
-    print(f"{CYAN}{BOLD}  Kometa Asset Cleanup{RESET}  {mode_label}{unknown_label}")
+    print(f"\n{CYAN}{BOLD}{'─'*60}{RESET}")
+    print(f"{CYAN}{BOLD}  Asset Cleanup{RESET}  {mode_label}{unknown_label}")
     print(f"{CYAN}{BOLD}{'─'*60}{RESET}\n")
 
     # ── Fetch API data ───────────────────────────────────────────────────────
     log.info("Fetching data from Radarr, Sonarr and Plex …")
     try:
-        radarr_ids, radarr_titles = get_radarr_data(cfg["radarr"]["url"], cfg["radarr"]["api_key"])
-        sonarr_ids, sonarr_titles = get_sonarr_data(cfg["sonarr"]["url"], cfg["sonarr"]["api_key"])
+        radarr_ids, radarr_titles = get_radarr_data(_normalise_instances(cfg.get("radarr", [])))
+        sonarr_ids, sonarr_titles = get_sonarr_data(_normalise_instances(cfg.get("sonarr", [])))
         plex_names                = get_plex_collection_names(cfg["plex"]["url"], cfg["plex"]["token"])
     except requests.RequestException as exc:
         log.error(f"API error: {exc}")
@@ -410,21 +525,19 @@ def main() -> None:
     if ignore_set:
         log.info(f"Ignoring {len(ignore_set)} entries from config")
 
-    # ── Build set of dirs to skip when encountered as sub-entries ───────────
+    # ── Asset dirs ───────────────────────────────────────────────────────────
     asset_dirs = [Path(d) for d in cfg.get("asset_dirs", [])]
     skip_dirs  = {d.resolve() for d in asset_dirs}
+    skip_dirs |= {(d / "tmp").resolve() for d in asset_dirs if (d / "tmp").exists()}
 
     # ── Scan & report per directory ──────────────────────────────────────────
     all_keep:    list[Path] = []
     all_remove:  list[Path] = []
     all_unknown: list[Path] = []
     all_ignored: list[Path] = []
-    dirs_scanned: list[str] = []
-    per_dir:      list[dict] = []
+    per_dir:     list[dict] = []
 
     for asset_dir in asset_dirs:
-        dir_label = asset_dir.name  # e.g. "assets" or "tmp"
-        dirs_scanned.append(str(asset_dir))
         log.info(f"Scanning {asset_dir} …")
 
         keep, remove, unknown, ignored = scan_asset_dir(
@@ -433,29 +546,50 @@ def main() -> None:
             sonarr_ids, sonarr_titles,
             plex_names, ignore_set,
         )
+
+        # ── tmp deduplication ────────────────────────────────────────────────
+        # For every removal candidate, check if a matching entry exists in the
+        # sibling tmp/ dir and queue it alongside — avoids scanning tmp
+        # separately and reporting the same entry twice.
+        tmp_companions: list[Path] = []
+        for path in remove + (unknown if delete_unknown else []):
+            companion = find_tmp_companion(path)
+            if companion and companion not in tmp_companions:
+                tmp_companions.append(companion)
+                log.debug(f"  Found tmp companion: {companion.name}")
+
         all_keep    += keep
-        all_remove  += remove
+        all_remove  += remove + tmp_companions
         all_unknown += unknown
         all_ignored += ignored
-        per_dir.append({"label": asset_dir.name, "remove": remove, "unknown": unknown})
+        per_dir.append({
+            "label": asset_dir.name,
+            "remove": remove,
+            "unknown": unknown,
+            "tmp_companions": tmp_companions,
+        })
 
         log.info(
             f"  {GREEN}Keep: {len(keep)}{RESET}  "
-            f"{RED}Remove: {len(remove)}{RESET}  "
-            f"{YELLOW}Unknown: {len(unknown)}{RESET}"
+            f"{RED}Remove: {len(remove)}{RESET}"
+            + (f" (+{len(tmp_companions)} tmp){RESET}" if tmp_companions else "") +
+            f"  {YELLOW}Unknown: {len(unknown)}{RESET}"
             + (f"  {DIM}Ignored: {len(ignored)}{RESET}" if ignored else "")
         )
 
-        # Report removals for this directory
+        # Report removals
         if remove:
             label = "Would remove" if dry_run else "Removing"
-            log.info(f"  {label} {len(remove)} orphaned entries:")
+            log.info(f"  {label} {len(remove)} orphaned entries"
+                     + (f" + {len(tmp_companions)} tmp companions:" if tmp_companions else ":"))
             for path in sorted(remove, key=lambda p: p.name.lower()):
-                log.info(f"    {RED}✗ {path.name}  {DIM}({_entry_size(path)}){RESET}")
+                has_companion = any(c.name == path.name for c in tmp_companions)
+                companion_tag = f"  {DIM}[+tmp]{RESET}" if has_companion else ""
+                log.info(f"    {RED}✗ {path.name}  {DIM}({_entry_size(path)}){RESET}{companion_tag}")
         else:
             log.info(f"  {GREEN}No orphaned entries.{RESET}")
 
-        # Report unknowns for this directory
+        # Report unknowns
         if unknown:
             if delete_unknown:
                 label_u = "Would remove" if dry_run else "Removing"
@@ -491,6 +625,17 @@ def main() -> None:
                     log.debug(f"Deleted unknown: {path}")
             else:
                 failed_unknown += 1
+
+    # ── Empty folder sweep ───────────────────────────────────────────────────
+    if not dry_run:
+        swept = sweep_empty_dirs(asset_dirs, skip_dirs, dry_run=False)
+        if swept:
+            log.info(f"Swept {swept} empty folder(s)")
+    else:
+        # Report what would be swept without touching anything
+        swept = sweep_empty_dirs(asset_dirs, skip_dirs, dry_run=True)
+        if swept:
+            log.info(f"Would sweep {swept} empty folder(s)")
 
     # ── Summary ──────────────────────────────────────────────────────────────
     print(f"\n{CYAN}{BOLD}{'─'*60}{RESET}")

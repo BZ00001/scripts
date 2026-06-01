@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# version: 1.1
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Credits
 # ─────────────────────────────────────────────────────────────────────────────
@@ -79,145 +81,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "log_level": "INFO",
     "instances": [],
 }
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Folder-name helpers  (module-level, shared by both formatters)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _move_the(title: str) -> str:
-    """'The Foo' → 'Foo, The'  (also handles 'A' and 'An')."""
-    m = re.match(r"^(The|A|An)\s+(.+)$", title, re.IGNORECASE)
-    return f"{m.group(2)}, {m.group(1)}" if m else title
-
-
-def _colon_replacement(naming_config: Dict) -> tuple:
-    """
-    Return (colon_space_replace, colon_replace) strings from the naming config.
-
-    Sonarr's Smart mode (from FileNameBuilder.cs) replaces ': ' (colon-space)
-    with ' - ' for better appearance, then bare ':' with '-'.
-    Other modes apply the same replacement to all colons.
-
-    Returns a tuple of (colon_space_replace, colon_replace) so _clean_title
-    can apply them in the correct order.
-    """
-    fmt = naming_config.get("colonReplacementFormat", 0)
-    # Map to (colon-space replacement, bare-colon replacement)
-    mapping = {
-        0: ("", ""),                   # delete
-        1: ("-", "-"),                 # dash
-        2: (" -", " -"),              # space dash
-        3: (" - ", " - "),            # space dash space
-        4: (" - ", "-"),              # smart: ': ' → ' - ', ':' → '-'
-        "delete":         ("", ""),
-        "dash":           ("-", "-"),
-        "spaceDash":      (" -", " -"),
-        "spaceDashSpace": (" - ", " - "),
-        "smart":          (" - ", "-"),
-    }
-    return mapping.get(fmt, ("", ""))
-
-
-def _clean_title(title: str, colon_replace: tuple = ("", ""), replace_illegal: bool = False) -> str:
-    """
-    Strip / replace characters that are illegal in folder names.
-
-    *colon_replace* is a (colon_space_replace, bare_colon_replace) tuple from
-    _colon_replacement(), matching Sonarr/Radarr's CleanFileName logic exactly:
-    Smart mode replaces ': ' and ':' differently; other modes use the same
-    string for both.
-
-    *replace_illegal* mirrors the app's replaceIllegalCharacters setting.
-    When True, each illegal character is replaced using Sonarr's exact mapping
-    (from FileNameBuilder.cs):
-      \\  →  +      /  →  +
-      <   →  ''     >  →  ''
-      ?   →  !      *  →  -
-      |   →  ''     "  →  ''
-    When False, all illegal characters are removed entirely.
-    """
-    # Normalise curly/fancy apostrophes and quotes to ASCII equivalents
-    # so folder-name comparisons work regardless of what the API returns.
-    title = title.replace("\u2019", "'").replace("\u2018", "'")   # ' '
-    title = title.replace("\u201c", '"').replace("\u201d", '"')   # " "
-    # Apply colon-space first (Smart mode distinction), then bare colon.
-    colon_space_rep, bare_colon_rep = colon_replace
-    title = title.replace(": ", f"{colon_space_rep} " if colon_space_rep else " ")
-    title = title.replace(":", bare_colon_rep)
-    if replace_illegal:
-        # Per-character replacements from Sonarr/Radarr FileNameBuilder.cs
-        title = title.replace("\\", "+").replace("/", "+")
-        title = title.replace("<", "").replace(">", "")
-        title = title.replace("?", "!").replace("*", "-")
-        title = title.replace("|", "").replace('"', "")
-    else:
-        title = re.sub(r'[<>"/\\|?*]', "", title)
-    return re.sub(r"\s{2,}", " ", title).strip()
-
-
-def _with_year(base: str, year_str: str) -> str:
-    """Append (year) to *base* unless it is already present."""
-    if not year_str:
-        return base
-    if base.endswith(f"({year_str})"):
-        return base
-    return f"{base} ({year_str})"
-
-
-def _format_folder_name(record: Dict, folder_format: str, prefix: str, colon_replace: tuple = ("", ""), replace_illegal: bool = False) -> str:
-    """
-    Expand arr folder-format tokens for *record*.
-
-    *prefix* is ``"Movie"`` for Radarr or ``"Series"`` for Sonarr.
-    *colon_replace* and *replace_illegal* are derived from the app's naming
-    config and applied consistently so computed names match what the app
-    would produce.  Tokens not present in the replacements dict are left
-    as-is so they surface clearly in logs rather than silently disappearing.
-    """
-    title:   str = record.get("title", "Unknown")
-    year:    int = record.get("year", 0)
-    imdb_id: str = record.get("imdbId", "") or ""
-    year_str     = str(year) if year else ""
-
-    title_clean     = _clean_title(title, colon_replace, replace_illegal)
-    title_the_clean = _clean_title(_move_the(title), colon_replace, replace_illegal)
-
-    replacements: Dict[str, str] = {
-        f"{{{prefix} TitleTheYear}}": _with_year(title_the_clean, year_str),
-        f"{{{prefix} TitleYear}}":    _with_year(title_clean,     year_str),
-        f"{{{prefix} TitleThe}}":     title_the_clean,
-        f"{{{prefix} Title}}":        title_clean,
-        f"{{{prefix} CleanTitle}}":   title_clean,
-        f"{{{prefix} Year}}":         year_str,
-        f"{{{prefix} ImdbId}}":       imdb_id,
-        # Shorthand variants used in some folder-format strings
-        "{ImdbId}":                   imdb_id,
-        "{Year}":                     year_str,
-    }
-
-    if prefix == "Movie":
-        tmdb_id: int = record.get("tmdbId", 0)
-        replacements["{Movie TmdbId}"] = str(tmdb_id) if tmdb_id else ""
-        replacements["{TmdbId}"]       = str(tmdb_id) if tmdb_id else ""
-        # {Release Year} is Radarr's token for the theatrical release year –
-        # equivalent to {Movie Year} in folder-format context.
-        replacements["{Release Year}"] = year_str
-        # {Edition Tags} / {Edition} expand to the edition tag (e.g. "Director's Cut").
-        # We leave it empty here so folders without an edition are unaffected;
-        # folders that include it will be skipped by the no-op replacement.
-        edition = record.get("movieFile", {}).get("edition", "") or ""
-        replacements["{Edition Tags}"] = edition
-        replacements["{Edition}"]      = edition
-    else:
-        tvdb_id: int = record.get("tvdbId", 0)
-        replacements[f"{{{prefix} TvdbId}}"] = str(tvdb_id) if tvdb_id else ""
-        replacements["{TvdbId}"]             = str(tvdb_id) if tvdb_id else ""
-
-    result = folder_format
-    for token, value in replacements.items():
-        result = result.replace(token, value)
-    return result.strip()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -393,120 +256,36 @@ class ArrClient:
             body = {"name": "RenameFiles", id_param: media_id, "files": file_ids}
             self._post("command", body)
 
-    def rename_folders(
-        self,
-        media_ids: List[int],
-        root_folder: str,
-        naming_config: Dict,
-        dry_run: bool = False,
-    ) -> Any:
+    def rename_folders(self, media_ids: List[int], root_folder: str) -> bool:
         """
-        Rename folders to match the configured naming format.
+        Ask the app to rename folders to match its configured naming format.
 
-        The naming config is passed in (fetched once per instance) rather
-        than fetched here to avoid a redundant API call per chunk.
+        Uses the native movie/editor or series/editor endpoint with
+        moveFiles=true and the same rootFolderPath the items are already in.
+        This delegates all naming logic (token expansion, colon replacement,
+        illegal character handling, CleanTitle, etc.) entirely to Radarr /
+        Sonarr, so the script never needs to reimplement it.
 
-        Both Radarr and Sonarr pre-check the expected folder name so items
-        whose folder is already correct are silently skipped.
-
-        Both instances update the media record's path via PUT with the
-        moveFiles=true query parameter, which tells the app to physically
-        move the folder on disk rather than just updating the database path.
-        Returns True if at least one folder was renamed, False otherwise.
+        Returns True if the editor call succeeded, False on error.
         """
         if self.instance_type == "radarr":
-            folder_format: str = naming_config.get("movieFolderFormat", "{Movie TitleYear}")
-            colon_replace  = _colon_replacement(naming_config)
-            replace_illegal = naming_config.get("replaceIllegalCharacters", True)
-            any_updated = False
-
-            for movie_id in media_ids:
-                try:
-                    movie = self._get(f"movie/{movie_id}")
-                except Exception as exc:
-                    self._logger.warning("Could not fetch movie %d: %s", movie_id, exc)
-                    continue
-
-                if not movie.get("hasFile", False):
-                    self._logger.debug(
-                        "Movie %d (%s) has no files on disk, skipping folder rename.",
-                        movie_id, movie.get("title", "?"),
-                    )
-                    continue
-
-                new_folder     = _format_folder_name(movie, folder_format, "Movie", colon_replace, replace_illegal)
-                current_folder = Path(movie.get("path", "").rstrip("/\\")).name
-
-                if current_folder == new_folder:
-                    self._logger.debug(
-                        "Movie %d folder already correct (%s), skipping.",
-                        movie_id, current_folder,
-                    )
-                else:
-                    new_path = str(
-                        Path(movie.get("rootFolderPath", "").rstrip("/\\")) / new_folder
-                    )
-                    self._logger.info(
-                        "Movie folder rename: %s  →  %s", current_folder, new_folder
-                    )
-                    if not dry_run:
-                        try:
-                            movie["path"] = new_path
-                            self._put_with_move(f"movie/{movie_id}", movie)
-                            any_updated = True
-                        except Exception as exc:
-                            self._logger.warning(
-                                "Failed to update movie %d path: %s", movie_id, exc
-                            )
-
-            return any_updated
-
-        # ── Sonarr: update series path via PUT ────────────────────────────────
-        folder_format   = naming_config.get("seriesFolderFormat", "{Series TitleYear}")
-        colon_replace   = _colon_replacement(naming_config)
-        replace_illegal = naming_config.get("replaceIllegalCharacters", True)
-        any_updated     = False
-
-        for series_id in media_ids:
-            try:
-                series = self._get(f"series/{series_id}")
-            except Exception as exc:
-                self._logger.warning("Could not fetch series %d: %s", series_id, exc)
-                continue
-
-            new_folder     = _format_folder_name(series, folder_format, "Series", colon_replace, replace_illegal)
-            current_path   = series.get("path", "").rstrip("/\\")
-            current_folder = Path(current_path).name
-
-            if current_folder == new_folder:
-                self._logger.debug(
-                    "Series %d folder already correct (%s), skipping.",
-                    series_id, current_folder,
-                )
-                continue
-
-            new_path = str(Path(series.get("rootFolderPath", root_folder)) / new_folder)
-            self._logger.info(
-                "Series folder rename: %s  →  %s", current_folder, new_folder
-            )
-
-            if not dry_run:
-                try:
-                    series["path"] = new_path
-                    self._put_with_move(f"series/{series_id}", series)
-                    any_updated = True
-                except Exception as exc:
-                    self._logger.warning(
-                        "Failed to update series %d path: %s", series_id, exc
-                    )
-
-        return any_updated  # True if at least one series path was changed
-
-    # ── naming config ─────────────────────────────────────────────────────────
-
-    def get_naming_config(self) -> Dict:
-        """Return the Sonarr/Radarr naming configuration."""
-        return self._get("config/naming")
+            body = {
+                "movieIds":       media_ids,
+                "rootFolderPath": root_folder,
+                "moveFiles":      True,
+            }
+        else:
+            body = {
+                "seriesIds":      media_ids,
+                "rootFolderPath": root_folder,
+                "moveFiles":      True,
+            }
+        try:
+            self._put(self._editor_endpoint(), body)
+            return True
+        except Exception as exc:
+            self._logger.warning("Folder rename via editor failed: %s", exc)
+            return False
 
     # ── refresh ───────────────────────────────────────────────────────────────
 
@@ -544,11 +323,9 @@ def get_chunks(items: List[Any], size: int) -> List[List[Any]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def get_effective_count(settings: Dict, logger: logging.Logger) -> int:
+def get_effective_count(settings: Dict) -> int:
     """Return the count limit for this instance (0 = process everything)."""
-    count = settings.get("count", 0)
-    logger.info("Using count=%s", count if count else "all")
-    return count
+    return settings.get("count", 0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -573,15 +350,13 @@ def process_instance(
     rename_folders  = settings.get("rename_folders", False)
     tag_name        = settings.get("tag_name")
     ignore_tag      = settings.get("ignore_tag")
-    count: int      = get_effective_count(settings, logger)
+    count: int      = get_effective_count(settings)
 
     # CLI --title overrides yml title_filter; both are optional.
     title_filter = title_filter or settings.get("title_filter") or None
 
     logger.info("── %s (%s) ──────────────────────────────────", app.name, app.instance_type)
-
-    # Fetch naming config once per instance run (not per chunk / per item).
-    naming_config: Dict = app.get_naming_config() if rename_folders else {}
+    logger.info("Using count=%s", count if count else "all")
 
     media_list = app.get_parsed_media()
 
@@ -673,9 +448,10 @@ def process_instance(
 
         # ── dry run: show folder renames that would happen ────────────────────
         if dry_run and rename_folders and grouped_root_folders:
-            logger.info("[DRY RUN] Checking folder renames…")
-            for root_folder, folder_ids in grouped_root_folders.items():
-                app.rename_folders(folder_ids, root_folder, naming_config, dry_run=True)
+            logger.info(
+                "[DRY RUN] Would trigger native folder rename for %d item(s).",
+                sum(len(v) for v in grouped_root_folders.values()),
+            )
 
         if not dry_run:
             # ── rename files ──────────────────────────────────────────────────
@@ -707,8 +483,7 @@ def process_instance(
                 ]
                 any_folder_renamed = False
                 for root_folder, folder_ids in grouped_root_folders.items():
-                    result = app.rename_folders(folder_ids, root_folder, naming_config)
-                    if result is True:
+                    if app.rename_folders(folder_ids, root_folder):
                         any_folder_renamed = True
 
                 if any_folder_renamed:
@@ -726,8 +501,6 @@ def process_instance(
                                 item["path_name"],
                                 item["new_path_name"],
                             )
-                else:
-                    logger.info("All folders already correctly named.")
 
         # ── collect results ───────────────────────────────────────────────────
         total_files   = sum(len(i.get("file_info", {})) for i in chunk)
@@ -834,36 +607,40 @@ def send_discord_notification(
     for instance_name, data in results.items():
         items         = data.get("data", [])
         renamed_items = [i for i in items if i.get("file_info") or i.get("new_path_name")]
+        total_checked = len(items)
 
         if not renamed_items:
+            fields.append({
+                "name":   data["server_name"],
+                "value":  f"✅ No items needed renaming  ({total_checked} checked)",
+                "inline": False,
+            })
             continue
 
-        lines = []
+        lines_files   = []
+        lines_folders = []
         for item in renamed_items:
             year_str = str(item["year"]) if item["year"] else ""
             title_display = item["title"]
             if year_str and not title_display.endswith(f"({year_str})"):
                 title_display = f"{title_display} ({year_str})"
-            line = f"**{title_display}**"
 
             if item.get("new_path_name"):
                 old_folder = Path(item["path_name"]).name
                 new_folder = Path(item["new_path_name"]).name
-                line += f"\n　📁 `{old_folder}`"
-                line += f"\n　　→ `{new_folder}`"
+                lines_folders.append(
+                    f"**{title_display}**"
+                    f"\n　📁 `{old_folder}`"
+                    f"\n　　→ `{new_folder}`"
+                )
 
-            for old_file, new_file in item.get("file_info", {}).items():
-                # Truncate long filenames so the embed stays readable
-                old_str = old_file if len(old_file) <= 60 else old_file[:57] + "…"
-                new_str = new_file if len(new_file) <= 60 else new_file[:57] + "…"
-                line += f"\n　📄 `{old_str}`"
-                line += f"\n　　→ `{new_str}`"
-
-            lines.append(line)
-
-        value = "\n\n".join(lines)
-        if len(value) > 1024:
-            value = value[:1020] + "\n…"
+            if item.get("file_info"):
+                file_lines = [f"**{title_display}**"]
+                for old_file, new_file in item["file_info"].items():
+                    old_str = old_file if len(old_file) <= 60 else old_file[:57] + "…"
+                    new_str = new_file if len(new_file) <= 60 else new_file[:57] + "…"
+                    file_lines.append(f"　📄 `{old_str}`\n　　→ `{new_str}`")
+                lines_files.append("\n".join(file_lines))
 
         total_files   = sum(len(i.get("file_info", {})) for i in renamed_items)
         total_folders = sum(1 for i in renamed_items if i.get("new_path_name"))
@@ -872,9 +649,23 @@ def send_discord_notification(
             parts.append(f"{total_files} file{'s' if total_files != 1 else ''}")
         if total_folders:
             parts.append(f"{total_folders} folder{'s' if total_folders != 1 else ''}")
-        field_name = f"{data['server_name']}  ({', '.join(parts)} renamed)"
+        header = (
+            f"{data['server_name']}  —  "
+            f"{len(renamed_items)} / {total_checked} changed"
+            + (f"  ({', '.join(parts)})" if parts else "")
+        )
 
-        fields.append({"name": field_name, "value": value, "inline": False})
+        if lines_files:
+            value = "\n\n".join(lines_files)
+            if len(value) > 1024:
+                value = value[:1020] + "\n…"
+            fields.append({"name": f"{header}  ·  📄 Files", "value": value, "inline": False})
+
+        if lines_folders:
+            value = "\n\n".join(lines_folders)
+            if len(value) > 1024:
+                value = value[:1020] + "\n…"
+            fields.append({"name": f"{header}  ·  📁 Folders", "value": value, "inline": False})
 
     if not fields:
         logger.debug("Discord: nothing to report, skipping notification.")

@@ -16,19 +16,28 @@ verbose: false
 # ── Directories to scan ────────────────────────────────────────────────────
 # Only the TOP LEVEL of each directory is scanned; sub-folders inside an
 # asset folder (e.g. Season posters) are treated as part of that asset.
+# List primary asset dirs only.
+# tmp/ subdirectories are checked automatically for each removal found.
 asset_dirs:
   - /mnt/user/appdata/kometa/assets
-  - /mnt/user/appdata/kometa/assets/tmp
 
-# ── Radarr ────────────────────────────────────────────────────────────────
+# ── Radarr (one or more instances) ───────────────────────────────────────
 radarr:
-  url: http://localhost:7878
-  api_key: YOUR_RADARR_API_KEY
+  - name: Radarr
+    url: http://localhost:7878
+    api_key: YOUR_RADARR_API_KEY
+  # - name: Radarr 4K
+  #   url: http://localhost:7879
+  #   api_key: YOUR_RADARR_4K_API_KEY
 
-# ── Sonarr ────────────────────────────────────────────────────────────────
+# ── Sonarr (one or more instances) ───────────────────────────────────────
 sonarr:
-  url: http://localhost:8989
-  api_key: YOUR_SONARR_API_KEY
+  - name: Sonarr
+    url: http://localhost:8989
+    api_key: YOUR_SONARR_API_KEY
+  # - name: Sonarr 4K
+  #   url: http://localhost:8990
+  #   api_key: YOUR_SONARR_4K_API_KEY
 
 # ── Plex ──────────────────────────────────────────────────────────────────
 plex:

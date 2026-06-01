@@ -3,13 +3,13 @@
 # Global settings
 # ─────────────────────────────────────────────────────────────────────────────
 
-dry_run: true           # Set true to log actions without touching anything
+dry_run: false          # Set true to log actions without touching anything
 log_level: INFO         # DEBUG | INFO | WARNING | ERROR
 
 # Discord webhook URL for run notifications (optional).
 # Only sends a message when items were actually searched.
 # Leave commented out or empty to disable.
-# discord_webhook: https://discord.com/api/webhooks/YOUR_WEBHOOK_URL
+discord_webhook: https://discord.com/api/webhooks/1489997020205678633/3o8pFaSw5qfCzq2v9nl0pRgUe33lLAErW12mu4HwwVPTUMwwegt8HG55m5YmJdKFPV9H
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Instances
@@ -21,8 +21,8 @@ instances:
   - name: Radarr
     type: radarr
     url: http://192.168.1.200:7878            # or http://192.168.1.x:7878
-    api_key: YOUR_API_KEY
-    count: 5                                  # how many movies to search per run
+    api_key: cf98a49b5a7c40588cc1dc79cb974d94
+    count: 1                                  # how many movies to search per run
     tag_name: checked                         # tag applied after a search is triggered
     ignore_tag: upgr-ignore                   # movies with this tag are always skipped (optional)
     unattended: true                          # if true, clears tags when all items are processed
@@ -46,8 +46,8 @@ instances:
   - name: Sonarr
     type: sonarr
     url: http://192.168.1.200:8989
-    api_key: YOUR_API_KEY
-    count: 5                                  # how many series to search per run
+    api_key: 79d5d75880f6426c970cd7baa12a6ac2
+    count: 3                                  # how many series to search per run
     tag_name: checked
     ignore_tag: upgr-ignore
     unattended: true
