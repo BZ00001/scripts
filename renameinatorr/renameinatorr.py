@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# version: 1.1
+# version: 1.2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Credits
@@ -680,7 +680,7 @@ def send_discord_notification(
         "color":     EMBED_COLOR,
         "fields":    fields,
         "footer":    {"text": "renameinatorr"},
-        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
     try:

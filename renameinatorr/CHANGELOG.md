@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.2.0] – 2026-06-01
+
+### Fixed
+- `datetime.datetime.utcnow()` replaced with `datetime.datetime.now(datetime.timezone.utc)` in the Discord notification — `utcnow()` was deprecated in Python 3.12 and produced a visible warning in Unraid User Scripts logs.
+
+---
+
 ## [1.1.0] – 2026-05-31
 
 ### Added
