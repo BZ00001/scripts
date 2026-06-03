@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# version: 1.2
+# version: 1.3
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Credits
@@ -136,14 +136,6 @@ class ArrClient:
         r.raise_for_status()
         return r.json()
 
-    def _put_with_move(self, path: str, body: Dict) -> Any:
-        """PUT with moveFiles=true so the app physically moves the folder on disk."""
-        r = self._session.put(
-            self._url(path), json=body, params={"moveFiles": "true"}, timeout=60
-        )
-        r.raise_for_status()
-        return r.json()
-
     # ── connection ────────────────────────────────────────────────────────────
 
     def ping(self) -> bool:
@@ -239,22 +231,75 @@ class ArrClient:
 
     # ── rename execution ──────────────────────────────────────────────────────
 
-    def rename_media(self, media_file_ids: Dict[int, List[Dict]]) -> None:
+    def rename_media(self, media_file_ids: Dict[int, List[Dict]]) -> List[int]:
         """
         Trigger RenameFiles commands using pre-collected rename-list entries.
 
-        *media_file_ids* maps media_id → raw rename-list dicts and is built
-        during the item loop in process_instance, avoiding a second API fetch.
+        *media_file_ids* maps media_id to raw rename-list dicts, built during
+        the item loop in process_instance to avoid a second API fetch.
+
+        Returns a list of command IDs so the caller can poll for completion.
         """
         id_param     = "movieId"     if self.instance_type == "radarr" else "seriesId"
         file_id_key  = "movieFileId" if self.instance_type == "radarr" else "episodeFileId"
+        command_ids: List[int] = []
 
         for media_id, rename_list in media_file_ids.items():
             file_ids = [item[file_id_key] for item in rename_list if file_id_key in item]
             if not file_ids:
                 continue
             body = {"name": "RenameFiles", id_param: media_id, "files": file_ids}
-            self._post("command", body)
+            resp = self._post("command", body)
+            if resp.get("id"):
+                command_ids.append(resp["id"])
+
+        return command_ids
+
+    def wait_for_commands(self, command_ids: List[int], timeout: int = 60) -> bool:
+        """
+        Poll until all commands in *command_ids* finish or *timeout* elapses.
+
+        Returns True if all completed successfully, False if any timed out
+        or failed.
+        """
+        if not command_ids:
+            return True
+        deadline = time.time() + timeout
+        pending  = set(command_ids)
+        while time.time() < deadline and pending:
+            for cmd_id in list(pending):
+                try:
+                    state = self._get(f"command/{cmd_id}").get("state", "")
+                    if state == "completed":
+                        pending.discard(cmd_id)
+                    elif state in ("failed", "aborted"):
+                        self._logger.warning("Command %d %s.", cmd_id, state)
+                        pending.discard(cmd_id)
+                except Exception:
+                    pass
+            if pending:
+                time.sleep(3)
+        if pending:
+            self._logger.warning(
+                "%d command(s) did not complete within %ds.", len(pending), timeout
+            )
+            return False
+        return True
+
+    def verify_renames(self, media_ids: List[int]) -> Dict[int, List[Dict]]:
+        """
+        Re-check the rename list for *media_ids* after a rename command.
+
+        Returns a dict of media_id to remaining rename-list entries for any
+        items that still have files needing renaming, indicating the rename
+        did not complete successfully.
+        """
+        remaining: Dict[int, List[Dict]] = {}
+        for media_id in media_ids:
+            leftover = self.get_rename_list(media_id)
+            if leftover:
+                remaining[media_id] = leftover
+        return remaining
 
     def rename_folders(self, media_ids: List[int], root_folder: str) -> bool:
         """
@@ -457,9 +502,27 @@ def process_instance(
             # ── rename files ──────────────────────────────────────────────────
             if media_rename_lists:
                 logger.info("Renaming files for %d item(s)…", len(media_rename_lists))
-                app.rename_media(media_rename_lists)
+                command_ids = app.rename_media(media_rename_lists)
 
-            if any_renamed:
+                if command_ids:
+                    logger.info("Waiting for file rename to complete…")
+                    completed = app.wait_for_commands(command_ids)
+                    logger.info("File rename %s.", "completed" if completed else "timed out")
+
+                    # Verify - re-check the rename list to confirm files
+                    # were actually renamed on disk.
+                    logger.info("Verifying file renames…")
+                    remaining = app.verify_renames(list(media_rename_lists.keys()))
+                    if remaining:
+                        for media_id, leftover in remaining.items():
+                            for r in leftover:
+                                logger.warning(
+                                    "File not renamed: %s",
+                                    _clean_path(r.get("existingPath", "")),
+                                )
+                    else:
+                        logger.info("All file renames verified successfully.")
+
                 logger.info("Triggering post-file-rename refresh…")
                 app.refresh_items(list(media_rename_lists.keys()))
             else:
@@ -650,7 +713,7 @@ def send_discord_notification(
         if total_folders:
             parts.append(f"{total_folders} folder{'s' if total_folders != 1 else ''}")
         header = (
-            f"{data['server_name']}  —  "
+            f"{data['server_name']}  -  "
             f"{len(renamed_items)} / {total_checked} changed"
             + (f"  ({', '.join(parts)})" if parts else "")
         )

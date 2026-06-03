@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.3.0] – 2026-06-03
+
+### Added
+- Version number added to script header (`# version: 1.3`).
+- `wait_for_commands` method — polls all RenameFiles command IDs concurrently until they complete, fail, or a 60-second timeout elapses. File renames are now confirmed before the script moves on.
+- `verify_renames` method — after a RenameFiles command completes, re-checks the rename list for each affected series/movie. Any files still needing a rename are logged as warnings, making it clear when a rename did not take effect on disk.
+- `rename_media` now returns a list of command IDs so the caller can poll for completion.
+
+### Fixed
+- File renames were fire-and-forget, so the script had no way to confirm they completed. RenameFiles commands are now polled and verified before continuing.
+- Dead `_put_with_move` method removed — it was left over from a previous approach and was never called.
+- Em-dash in Discord notification header replaced with a hyphen.
+
+---
+
 ## [1.2.0] – 2026-06-01
 
 ### Fixed
