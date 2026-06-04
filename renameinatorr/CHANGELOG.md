@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.1] – 2026-06-04
+
+### Changed
+- File rename polling timeout is now dynamic, calculated as `min(120, 30 + file_count * 2)` seconds. The previous `20 + file_count * 10` formula did not scale — 279 files produced a 2810-second timeout. Since the command status delay in Sonarr is roughly fixed regardless of file count, and `verify_renames` is the real source of truth, the timeout is now capped at 120 seconds. The timeout and file count are logged on each run so the value is visible.
+
+---
+
 ## [1.4.0] – 2026-06-04
 
 ### Added

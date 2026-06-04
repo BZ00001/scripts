@@ -539,8 +539,20 @@ def process_instance(
                         "been accepted by %s. Run with --debug for details.", app.name
                     )
                 else:
-                    logger.info("Waiting for file rename to complete…")
-                    completed = app.wait_for_commands(command_ids)
+                    # Dynamic timeout: 30s base plus 2s per file, capped at
+                    # 120s. The cap is intentional — evidence shows the command
+                    # status delay in Sonarr is roughly fixed regardless of
+                    # file count, and verify_renames is the real check anyway.
+                    total_files_to_rename = sum(
+                        len(rlist) for rlist in media_rename_lists.values()
+                    )
+                    dynamic_timeout = min(120, 30 + total_files_to_rename * 2)
+                    logger.info(
+                        "Waiting for file rename to complete "
+                        "(%d file(s), timeout %ds)…",
+                        total_files_to_rename, dynamic_timeout,
+                    )
+                    completed = app.wait_for_commands(command_ids, timeout=dynamic_timeout)
                     logger.info("File rename %s.", "completed" if completed else "timed out")
 
                     logger.info("Verifying file renames…")
