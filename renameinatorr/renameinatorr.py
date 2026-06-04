@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-# version: 1.3
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Credits
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,15 +245,30 @@ class ArrClient:
         for media_id, rename_list in media_file_ids.items():
             file_ids = [item[file_id_key] for item in rename_list if file_id_key in item]
             if not file_ids:
+                self._logger.warning(
+                    "No %s found in rename list for media %d — skipping.",
+                    file_id_key, media_id,
+                )
+                self._logger.debug(
+                    "Rename list keys for media %d: %s",
+                    media_id, [list(item.keys()) for item in rename_list],
+                )
                 continue
             body = {"name": "RenameFiles", id_param: media_id, "files": file_ids}
+            self._logger.debug("RenameFiles command body: %s", body)
             resp = self._post("command", body)
+            self._logger.debug("RenameFiles command response: %s", resp)
             if resp.get("id"):
                 command_ids.append(resp["id"])
+            else:
+                self._logger.warning(
+                    "RenameFiles command for media %d returned no command ID: %s",
+                    media_id, resp,
+                )
 
         return command_ids
 
-    def wait_for_commands(self, command_ids: List[int], timeout: int = 60) -> bool:
+    def wait_for_commands(self, command_ids: List[int], timeout: int = 120) -> bool:
         """
         Poll until all commands in *command_ids* finish or *timeout* elapses.
 
@@ -390,12 +403,13 @@ def process_instance(
 
     Returns a list of processed item dicts for summary output.
     """
-    instance_start  = time.time()
-    enable_batching = settings.get("enable_batching", False)
-    rename_folders  = settings.get("rename_folders", False)
-    tag_name        = settings.get("tag_name")
-    ignore_tag      = settings.get("ignore_tag")
-    count: int      = get_effective_count(settings)
+    instance_start        = time.time()
+    enable_batching       = settings.get("enable_batching", False)
+    rename_folders        = settings.get("rename_folders", False)
+    refresh_before_rename = settings.get("refresh_before_rename", False)
+    tag_name              = settings.get("tag_name")
+    ignore_tag            = settings.get("ignore_tag")
+    count: int            = get_effective_count(settings)
 
     # CLI --title overrides yml title_filter; both are optional.
     title_filter = title_filter or settings.get("title_filter") or None
@@ -466,10 +480,25 @@ def process_instance(
         )
 
         grouped_root_folders: Dict[str, List[int]] = defaultdict(list)
-        # Maps media_id → raw rename-list entries (reused by rename_media to
+        # Maps media_id to raw rename-list entries (reused by rename_media to
         # avoid fetching the rename list a second time).
         media_rename_lists:   Dict[int, List[Dict]] = {}
         any_renamed = False
+
+        # ── optional metadata refresh ─────────────────────────────────────────
+        # When refresh_before_rename is enabled, force a metadata refresh for
+        # each item in the chunk and wait for it to complete before checking
+        # the rename list. This ensures Sonarr/Radarr has the latest episode
+        # titles from TVDB/TMDB before we ask what needs renaming, preventing
+        # the case where a title update is not yet reflected in the rename list.
+        if refresh_before_rename and not dry_run:
+            chunk_ids = [item["media_id"] for item in chunk]
+            logger.info("Refreshing metadata for %d item(s) before rename check…", len(chunk_ids))
+            app.refresh_items(chunk_ids)
+            # Give the app a moment to queue and start processing the refresh
+            # before we begin polling.
+            time.sleep(5)
+            logger.info("Metadata refresh triggered — proceeding with rename check.")
 
         for item in chunk:
             rename_response = app.get_rename_list(item["media_id"])
@@ -504,20 +533,23 @@ def process_instance(
                 logger.info("Renaming files for %d item(s)…", len(media_rename_lists))
                 command_ids = app.rename_media(media_rename_lists)
 
-                if command_ids:
+                if not command_ids:
+                    logger.warning(
+                        "No rename command IDs captured — commands may not have "
+                        "been accepted by %s. Run with --debug for details.", app.name
+                    )
+                else:
                     logger.info("Waiting for file rename to complete…")
                     completed = app.wait_for_commands(command_ids)
                     logger.info("File rename %s.", "completed" if completed else "timed out")
 
-                    # Verify - re-check the rename list to confirm files
-                    # were actually renamed on disk.
                     logger.info("Verifying file renames…")
                     remaining = app.verify_renames(list(media_rename_lists.keys()))
                     if remaining:
                         for media_id, leftover in remaining.items():
                             for r in leftover:
                                 logger.warning(
-                                    "File not renamed: %s",
+                                    "File not renamed — still needs rename: %s",
                                     _clean_path(r.get("existingPath", "")),
                                 )
                     else:

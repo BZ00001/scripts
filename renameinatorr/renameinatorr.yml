@@ -55,6 +55,12 @@ instances:
     # chunk size. Set count to 0 to process everything in a single chunk.
     enable_batching: false
 
+    # When true, forces a metadata refresh from TVDB/TMDB for each item before
+    # checking the rename list. This ensures title updates are reflected
+    # immediately rather than waiting for Sonarr/Radarr's own refresh schedule.
+    # Slows each run down as the refresh must complete before renaming starts.
+    # refresh_before_rename: false
+
     # Restrict processing to items whose title contains this string
     # (case-insensitive substring match). Useful for testing a single item
     # before running against the full library. Comment out or leave empty
@@ -70,6 +76,7 @@ instances:
     ignore_tag: rename-ignore
     rename_folders: true
     enable_batching: false
+    # refresh_before_rename: false
     # title_filter: "Some Show"
 
   # Example: second Radarr instance (4K library)
@@ -82,4 +89,5 @@ instances:
   #   ignore_tag: rename-ignore
   #   rename_folders: true
   #   enable_batching: false
+  #   # refresh_before_rename: false
   #   # title_filter: "Some Movie"

@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.0] – 2026-06-04
+
+### Added
+- `refresh_before_rename` per-instance yml setting (default: false). When enabled, forces a metadata refresh from TVDB/TMDB for each item in the chunk before checking the rename list. This ensures title updates are reflected immediately rather than waiting for Sonarr/Radarr's own refresh schedule, at the cost of a slightly longer run time.
+
+### Changed
+- `wait_for_commands` default timeout increased from 60 to 120 seconds. The previous 60-second timeout caused a misleading warning even when the rename had completed successfully on disk, as confirmed by `verify_renames`.
+
+### Fixed
+- File renames were fire-and-forget, meaning the script had no way to confirm whether Sonarr/Radarr had actually renamed the file on disk. `rename_media` now returns command IDs, which are polled via `wait_for_commands` and then verified via `verify_renames`. If a file still needs renaming after the command completes, a warning is logged naming the specific file.
+- Diagnostic logging added to `rename_media` to surface cases where no file IDs are found in the rename list, or where Sonarr/Radarr returns a command response with no ID. Both conditions log a warning in normal runs and full detail at DEBUG level.
+- `refresh_before_rename` correctly skips the metadata refresh in dry-run mode.
+
+---
+
 ## [1.3.0] – 2026-06-03
 
 ### Added
