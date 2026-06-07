@@ -52,6 +52,20 @@ Scans Kometa asset directories and removes poster/background image files that no
 
 ---
 
+### `blocklist_cleaner.py`
+
+Removes blocklist entries older than a configurable number of days from Sonarr and Radarr. Keeps the blocklist from growing indefinitely with stale entries for releases that are long gone from indexers.
+
+**Features:**
+- Multi-instance support for Sonarr and Radarr
+- Configurable age threshold via `days`
+- Bulk delete via the `/blocklist/bulk` endpoint for efficiency
+- Dry-run mode (default: enabled) so nothing is deleted until you're confident
+- Discord webhook notifications summarising removed entries per instance
+- Config: `blocklist_cleaner.yml`
+
+---
+
 ## Setup
 
 ### Prerequisites
@@ -91,6 +105,7 @@ Each script reads a YAML config file from the same directory. Copy and edit the 
 | `upgradinatorr.py` | `upgradinatorr.yml` |
 | `renameinatorr.py` | `renameinatorr.yml` |
 | `asset_cleanup.py` | `asset_cleanup.yml` |
+| `blocklist_cleaner.py` | `blocklist_cleaner.yml` |
 
 Fill in your API URLs, API keys, and any optional settings. All scripts default to `dry_run: true` on first run.
 
@@ -112,6 +127,10 @@ Fill in your API URLs, API keys, and any optional settings. All scripts default 
 # asset_cleanup
 /mnt/user/appdata/scripts/natorr/python-venv/bin/python3 \
     /mnt/user/appdata/scripts/natorr/asset_cleanup.py
+
+# blocklist_cleaner
+/mnt/user/appdata/scripts/natorr/python-venv/bin/python3 \
+    /mnt/user/appdata/scripts/natorr/blocklist_cleaner.py
 ```
 
 Optional flags available on all scripts:
@@ -152,6 +171,13 @@ In the [User Scripts](https://forums.unraid.net/topic/48707-plugin-user-scripts/
 #!/bin/bash
 /mnt/user/appdata/scripts/natorr/python-venv/bin/python3 \
     /mnt/user/appdata/scripts/natorr/asset_cleanup.py
+```
+
+**blocklist_cleaner:**
+```bash
+#!/bin/bash
+/mnt/user/appdata/scripts/natorr/python-venv/bin/python3 \
+    /mnt/user/appdata/scripts/natorr/blocklist_cleaner.py
 ```
 
 Set your desired schedule (e.g. daily or hourly) in the User Scripts UI. Script output is captured and displayed in the Unraid web interface.

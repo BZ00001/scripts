@@ -1,0 +1,41 @@
+# blocklist_cleaner.yml
+# Configuration for blocklist_cleaner.py
+#
+# Place this file in the same directory as blocklist_cleaner.py,
+# or pass a custom path with --config /path/to/blocklist_cleaner.yml
+
+# ---------------------------------------------------------------
+# Safety - set to false once you've verified the dry-run output
+# ---------------------------------------------------------------
+dry_run: true
+
+# ---------------------------------------------------------------
+# Age threshold - entries older than this many days will be removed
+# ---------------------------------------------------------------
+days: 60
+
+# ---------------------------------------------------------------
+# Discord webhook URL for notifications (leave empty to disable)
+# ---------------------------------------------------------------
+discord_webhook: ""
+
+# ---------------------------------------------------------------
+# Instances - add one entry per Sonarr/Radarr instance
+# ---------------------------------------------------------------
+instances:
+  - name: "Sonarr"
+    url: "http://localhost:8989"
+    api_key: "your_sonarr_api_key_here"
+
+  - name: "Radarr"
+    url: "http://localhost:7878"
+    api_key: "your_radarr_api_key_here"
+
+  # Additional instances - uncomment and fill in as needed:
+  # - name: "Sonarr 4K"
+  #   url: "http://localhost:8990"
+  #   api_key: "your_sonarr_4k_api_key_here"
+
+  # - name: "Radarr 4K"
+  #   url: "http://localhost:7879"
+  #   api_key: "your_radarr_4k_api_key_here"
