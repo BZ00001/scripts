@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-# version: 1.4.1
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Credits
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +73,8 @@ import yaml
 SEASON_REGEX = re.compile(r"^Season \d+/", re.IGNORECASE)
 
 DEFAULT_BATCH_SIZE = 100
+
+VERSION = "1.4.3"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "dry_run": False,
@@ -349,21 +349,24 @@ class ArrClient:
 
     # ── refresh ───────────────────────────────────────────────────────────────
 
-    def refresh_items(self, media_ids: List[int]) -> Dict:
+    def refresh_items(self, media_ids: List[int]) -> List[int]:
         """
         Trigger a metadata refresh for *media_ids*.
 
-        All folder renames are done via PUT before this is called, so the
-        refresh is fire-and-forget — it just tells the app to rescan.
-        For Sonarr a command is fired per series due to API limitations.
+        Returns a list of command IDs so the caller can poll for completion.
+        For Sonarr a command is fired per series due to API limitations, so
+        all command IDs are collected and returned.
         """
         if self.instance_type == "radarr":
-            return self._post("command", {"name": "RefreshMovie", "movieIds": media_ids})
+            resp = self._post("command", {"name": "RefreshMovie", "movieIds": media_ids})
+            return [resp["id"]] if resp.get("id") else []
         else:
-            last: Dict = {}
+            command_ids: List[int] = []
             for media_id in media_ids:
-                last = self._post("command", {"name": "RefreshSeries", "seriesId": media_id})
-            return last
+                resp = self._post("command", {"name": "RefreshSeries", "seriesId": media_id})
+                if resp.get("id"):
+                    command_ids.append(resp["id"])
+            return command_ids
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -570,7 +573,10 @@ def process_instance(
                         logger.info("All file renames verified successfully.")
 
                 logger.info("Triggering post-file-rename refresh…")
-                app.refresh_items(list(media_rename_lists.keys()))
+                refresh_ids = app.refresh_items(list(media_rename_lists.keys()))
+                if refresh_ids:
+                    refresh_timeout = min(120, 30 + len(media_rename_lists) * 5)
+                    app.wait_for_commands(refresh_ids, timeout=refresh_timeout)
             else:
                 logger.info("No files need renaming in this chunk.")
 
@@ -590,26 +596,31 @@ def process_instance(
                 all_folder_ids: List[int] = [
                     mid for ids in grouped_root_folders.values() for mid in ids
                 ]
-                any_folder_renamed = False
                 for root_folder, folder_ids in grouped_root_folders.items():
-                    if app.rename_folders(folder_ids, root_folder):
-                        any_folder_renamed = True
+                    app.rename_folders(folder_ids, root_folder)
 
-                if any_folder_renamed:
+                # The editor endpoint updates the DB immediately, so path
+                # changes can be detected without waiting for a refresh.
+                updated = {m["media_id"]: m for m in app.get_parsed_media()}
+                actually_renamed: List[int] = []
+                for item in chunk:
+                    new_item = updated.get(item["media_id"])
+                    if new_item and new_item["path_name"] != item["path_name"]:
+                        item["new_path_name"] = new_item["path_name"]
+                        actually_renamed.append(item["media_id"])
+                        logger.info(
+                            "Folder renamed: %s  →  %s",
+                            item["path_name"],
+                            item["new_path_name"],
+                        )
+
+                # Only fire a rescan refresh when folders actually moved so
+                # Radarr/Sonarr picks up files at the new location. This is
+                # fire-and-forget — the DB is already correct, the rescan
+                # just confirms the files are present.
+                if actually_renamed:
                     logger.info("Triggering post-folder-rename refresh…")
-                    app.refresh_items(all_folder_ids)
-
-                    # Detect what actually changed.
-                    updated = {m["media_id"]: m for m in app.get_parsed_media()}
-                    for item in chunk:
-                        new_item = updated.get(item["media_id"])
-                        if new_item and new_item["path_name"] != item["path_name"]:
-                            item["new_path_name"] = new_item["path_name"]
-                            logger.info(
-                                "Folder renamed: %s  →  %s",
-                                item["path_name"],
-                                item["new_path_name"],
-                            )
+                    app.refresh_items(actually_renamed)
 
         # ── collect results ───────────────────────────────────────────────────
         total_files   = sum(len(i.get("file_info", {})) for i in chunk)
@@ -788,7 +799,7 @@ def send_discord_notification(
         "title":     title,
         "color":     EMBED_COLOR,
         "fields":    fields,
-        "footer":    {"text": "renameinatorr"},
+        "footer":    {"text": f"renameinatorr v{VERSION}"},
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
@@ -850,6 +861,8 @@ def main() -> None:
     logger    = setup_logging(log_level)
 
     dry_run: bool = args.dry_run or config.get("dry_run", False)
+
+    logger.info("renameinatorr v%s", VERSION)
 
     if dry_run:
         logger.info("═" * 50)

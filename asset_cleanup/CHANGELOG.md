@@ -8,7 +8,14 @@ All notable changes to `asset_cleanup.py` are documented here.
 
 ---
 
-## [1.2] - 2026-06-02
+## [1.3.0] - 2026-06-07
+
+### Added
+- `VERSION` constant added near the top of the script. The version is printed in the startup banner (`Asset Cleanup v1.3.0`) and included in the Discord notification footer (`asset_cleanup v1.3.0 | YYYY-MM-DD HH:MM`).
+
+---
+
+## [1.2.0] - 2026-06-02
 
 ### Fixed
 - Title fallback now also applies to entries with no ID tag at all. Previously, tagless folders were only matched against Plex collections and immediately flagged as unknown if not found there. They are now also checked against Sonarr and Radarr titles before being flagged.
@@ -16,7 +23,7 @@ All notable changes to `asset_cleanup.py` are documented here.
 
 ---
 
-## [1.1] - 2026-05-31
+## [1.1.0] - 2026-05-31
 
 ### Added
 - **Multiple Radarr and Sonarr instances.** `radarr` and `sonarr` config keys now accept a list of instances, each with a `name`, `url`, and `api_key`. IDs and titles are merged across all instances before scanning, so an asset is only removed if it is absent from every instance. The old single-dict format still works for backwards compatibility.

@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-# version: 1.1
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Credits
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,6 +78,7 @@ import yaml
 # ─────────────────────────────────────────────────────────────────────────────
 
 VALID_STATUSES = {"continuing", "airing", "ended", "canceled", "released"}
+VERSION = "1.2.1"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "dry_run": False,
@@ -669,8 +668,7 @@ def print_output(results: Dict[str, Optional[Dict]], logger: logging.Logger) -> 
 # Discord notifications
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Embed accent colour (Radarr blue-ish)
-EMBED_COLOR = 0x4F91C7
+EMBED_COLOR = 0x4F91C7   # Radarr blue-ish
 
 def send_discord_notification(
     webhook_url: str,
@@ -729,7 +727,7 @@ def send_discord_notification(
         "title": title,
         "color": EMBED_COLOR,
         "fields": fields,
-        "footer": {"text": "upgradinatorr"},
+        "footer": {"text": f"upgradinatorr v{VERSION}"},
         "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
     }
 
@@ -776,6 +774,7 @@ def main() -> None:
 
     log_level = "DEBUG" if args.debug else config.get("log_level", "INFO")
     logger = setup_logging(log_level)
+    logger.info("upgradinatorr v%s", VERSION)
 
     dry_run: bool = args.dry_run or config.get("dry_run", False)
 

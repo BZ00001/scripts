@@ -7,18 +7,6 @@ Part of the natorr script collection.
 https://github.com/YOUR_USERNAME/natorr
 """
 
-# ================================
-# CHANGELOG
-# ================================
-# [1.0.0] - 2026-06-07
-# - Initial release
-# - Multi-instance support for Sonarr and Radarr
-# - Configurable age threshold (days)
-# - Bulk delete via /blocklist/bulk endpoint
-# - Dry-run mode (defaults to true for safety)
-# - Discord webhook notifications with rich embeds
-# - Per-instance summary reporting
-
 import argparse
 import logging
 import sys
@@ -33,6 +21,7 @@ import yaml
 # ============================================================
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "blocklist_cleaner.yml"
+VERSION = "1.0.1"
 
 # ============================================================
 # LOGGING
@@ -154,7 +143,7 @@ def send_discord_notification(webhook_url: str, results: list[dict], dry_run: bo
         "description": f"Entries older than **{days} day{'s' if days != 1 else ''}** processed.",
         "color": color,
         "fields": fields,
-        "footer": {"text": f"Total removed: {total_deleted} | Total kept: {total_skipped}"},
+        "footer": {"text": f"blocklist_cleaner v{VERSION} - Total removed: {total_deleted} | Total kept: {total_skipped}"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -271,6 +260,8 @@ def main() -> None:
     dry_run = args.dry_run or config.get("dry_run", True)
     days = int(config.get("days", 30))
     discord_webhook = config.get("discord_webhook", "")
+
+    log.info("blocklist_cleaner v%s", VERSION)
 
     if dry_run:
         log.info("DRY-RUN mode enabled - no changes will be made")

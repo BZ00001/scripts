@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.4.3] – 2026-06-07
+
+### Fixed
+- Post-rename refresh commands were fire-and-forget, causing Radarr/Sonarr to show renamed media as Missing until a manual Refresh & Scan was triggered. `refresh_items` now returns all command IDs (collecting every per-series command for Sonarr rather than only the last one), and the post-file-rename refresh now polls for completion using the same `wait_for_commands` pattern as file renames. Timeout is `min(120, 30 + items * 5)` seconds.
+- Post-folder-rename refresh was polling all items in the chunk regardless of whether any folders actually changed, causing 80-136s timeouts on clean runs. The folder refresh is now fire-and-forget and only triggered when path changes are actually detected. Path change detection uses the immediate DB state after the editor endpoint call rather than waiting for the refresh to complete, since the editor endpoint updates the DB synchronously.
+
+---
+
+## [1.4.2] – 2026-06-07
+
+### Added
+- `VERSION` constant added to the constants section. The version is logged at startup (`renameinatorr vX.X.X`) so it is immediately visible in logs and support reports, making it easier to confirm which version is running.
+
+---
+
 ## [1.4.1] – 2026-06-04
 
 ### Changed

@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-
-# version: 1.2
-
 """
 asset_cleanup.py
 Removes Kometa asset folders/files that have no matching entry in
@@ -9,6 +6,8 @@ Radarr (TMDB), Sonarr (TVDB), or Plex collections.
 
 Config: asset_cleanup.yml (same directory as this script)
 """
+
+VERSION = "1.3.0"
 
 import os
 import re
@@ -474,7 +473,7 @@ def send_discord(
             "title": f"Asset Cleanup  {mode}",
             "color": colour,
             "fields": fields,
-            "footer": {"text": datetime.now().strftime("%Y-%m-%d %H:%M")},
+            "footer": {"text": f"asset_cleanup v{VERSION} | {datetime.now().strftime('%Y-%m-%d %H:%M')}"},
         }]
     }
     try:
@@ -510,7 +509,7 @@ def main() -> None:
     mode_label    = f"{YELLOW}{BOLD}DRY RUN{RESET}" if dry_run else f"{RED}{BOLD}LIVE MODE — files will be deleted{RESET}"
     unknown_label = f"  {YELLOW}(+unknown entries){RESET}" if delete_unknown else ""
     print(f"\n{CYAN}{BOLD}{'─'*60}{RESET}")
-    print(f"{CYAN}{BOLD}  Asset Cleanup{RESET}  {mode_label}{unknown_label}")
+    print(f"{CYAN}{BOLD}  Asset Cleanup v{VERSION}{RESET}  {mode_label}{unknown_label}")
     print(f"{CYAN}{BOLD}{'─'*60}{RESET}\n")
 
     # ── Fetch API data ───────────────────────────────────────────────────────
