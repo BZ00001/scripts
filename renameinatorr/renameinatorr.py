@@ -74,13 +74,42 @@ SEASON_REGEX = re.compile(r"^Season \d+/", re.IGNORECASE)
 
 DEFAULT_BATCH_SIZE = 100
 
-VERSION = "1.4.3"
+VERSION           = "1.5.1"
+GITHUB_RAW_URL    = "https://raw.githubusercontent.com/BZ00001/scripts/main/renameinatorr/renameinatorr.py"
+GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/renameinatorr"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "dry_run": False,
     "log_level": "INFO",
     "instances": [],
 }
+
+def _parse_version(v: str) -> tuple:
+    """Parse a version string into a tuple of ints for comparison."""
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except Exception:
+        return (0,)
+
+
+def check_for_update(logger: logging.Logger) -> Optional[str]:
+    """
+    Fetch the latest version from GitHub and return it if newer than the
+    running version, or None if already up to date or the check failed.
+    """
+    try:
+        resp = requests.get(GITHUB_RAW_URL, timeout=10)
+        resp.raise_for_status()
+        for line in resp.text.splitlines():
+            if line.startswith('VERSION = "') or line.startswith("VERSION = '"):
+                latest = line.split('"')[1] if '"' in line else line.split("'")[1]
+                if _parse_version(latest) > _parse_version(VERSION):
+                    return latest
+                return None
+    except Exception as exc:
+        logger.debug("Version check failed: %s", exc)
+    return None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -270,36 +299,83 @@ class ArrClient:
 
         return command_ids
 
-    def wait_for_commands(self, command_ids: List[int], timeout: int = 120) -> bool:
+    def wait_for_files_found(
+        self,
+        media_ids: List[int],
+        expected_paths: Optional[Dict[int, str]] = None,
+        max_wait: int = 120,
+        interval: int = 3,
+    ) -> bool:
         """
-        Poll until all commands in *command_ids* finish or *timeout* elapses.
+        Poll until Radarr/Sonarr confirms files are present for all *media_ids*.
 
-        Returns True if all completed successfully, False if any timed out
-        or failed.
+        If *expected_paths* is provided (media_id -> expected path), the check
+        requires both that the record path matches the expected value AND that
+        hasFile / episodeFileCount confirms a file is present. This is used
+        after folder renames to ensure Radarr has rescanned the new location
+        rather than just seeing hasFile=True from before the move.
+
+        Without *expected_paths*, only hasFile / episodeFileCount is checked.
         """
-        if not command_ids:
-            return True
-        deadline = time.time() + timeout
-        pending  = set(command_ids)
-        while time.time() < deadline and pending:
-            for cmd_id in list(pending):
+        deadline  = time.time() + max_wait
+        remaining = set(media_ids)
+        # Always wait at least one interval before the first poll — this
+        # ensures a minimum gap between firing the refresh and proceeding,
+        # even when hasFile / episodeFileCount was already satisfied before
+        # the refresh started.
+        time.sleep(interval)
+        while time.time() < deadline and remaining:
+            for media_id in list(remaining):
                 try:
-                    state = self._get(f"command/{cmd_id}").get("state", "")
-                    if state == "completed":
-                        pending.discard(cmd_id)
-                    elif state in ("failed", "aborted"):
-                        self._logger.warning("Command %d %s.", cmd_id, state)
-                        pending.discard(cmd_id)
+                    if self.instance_type == "radarr":
+                        record   = self._get(f"movie/{media_id}")
+                        has_file = record.get("hasFile", False)
+                        if expected_paths:
+                            expected = expected_paths.get(media_id, "")
+                            if has_file and record.get("path", "").rstrip("/\\") == expected.rstrip("/\\"):
+                                remaining.discard(media_id)
+                        elif has_file:
+                            remaining.discard(media_id)
+                    else:
+                        record     = self._get(f"series/{media_id}")
+                        file_count = record.get("statistics", {}).get("episodeFileCount", 0)
+                        if expected_paths:
+                            expected = expected_paths.get(media_id, "")
+                            if file_count > 0 and record.get("path", "").rstrip("/\\") == expected.rstrip("/\\"):
+                                remaining.discard(media_id)
+                        elif file_count > 0:
+                            remaining.discard(media_id)
                 except Exception:
                     pass
-            if pending:
-                time.sleep(3)
-        if pending:
+            if remaining:
+                time.sleep(interval)
+        if remaining:
             self._logger.warning(
-                "%d command(s) did not complete within %ds.", len(pending), timeout
+                "%d item(s) did not confirm files found within %ds.",
+                len(remaining), max_wait,
             )
             return False
         return True
+
+    def verify_rename_with_retry(
+        self, media_ids: List[int], max_wait: int = 60, interval: int = 3
+    ) -> bool:
+        """
+        Poll verify_renames until all files are confirmed renamed or
+        *max_wait* seconds elapse. Returns True if all renames verified.
+
+        This is more reliable than polling command status since Radarr/Sonarr
+        can be slow to mark commands as completed even when the rename itself
+        finished in seconds.
+        """
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            remaining = self.verify_renames(media_ids)
+            if not remaining:
+                return True
+            time.sleep(interval)
+        # Final check after deadline
+        return not self.verify_renames(media_ids)
 
     def verify_renames(self, media_ids: List[int]) -> Dict[int, List[Dict]]:
         """
@@ -349,24 +425,19 @@ class ArrClient:
 
     # ── refresh ───────────────────────────────────────────────────────────────
 
-    def refresh_items(self, media_ids: List[int]) -> List[int]:
+    def refresh_items(self, media_ids: List[int]) -> None:
         """
-        Trigger a metadata refresh for *media_ids*.
+        Trigger a fire-and-forget metadata refresh for *media_ids*.
 
-        Returns a list of command IDs so the caller can poll for completion.
-        For Sonarr a command is fired per series due to API limitations, so
-        all command IDs are collected and returned.
+        For Sonarr a command is fired per series due to API limitations.
+        Callers use wait_for_files_found to confirm files are present after
+        the refresh rather than polling command status.
         """
         if self.instance_type == "radarr":
-            resp = self._post("command", {"name": "RefreshMovie", "movieIds": media_ids})
-            return [resp["id"]] if resp.get("id") else []
+            self._post("command", {"name": "RefreshMovie", "movieIds": media_ids})
         else:
-            command_ids: List[int] = []
             for media_id in media_ids:
-                resp = self._post("command", {"name": "RefreshSeries", "seriesId": media_id})
-                if resp.get("id"):
-                    command_ids.append(resp["id"])
-            return command_ids
+                self._post("command", {"name": "RefreshSeries", "seriesId": media_id})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -487,8 +558,7 @@ def process_instance(
         grouped_root_folders: Dict[str, List[int]] = defaultdict(list)
         # Maps media_id to raw rename-list entries (reused by rename_media to
         # avoid fetching the rename list a second time).
-        media_rename_lists:   Dict[int, List[Dict]] = {}
-        any_renamed = False
+        media_rename_lists: Dict[int, List[Dict]] = {}
 
         # ── optional metadata refresh ─────────────────────────────────────────
         # When refresh_before_rename is enabled, force a metadata refresh for
@@ -519,7 +589,6 @@ def process_instance(
             item["new_path_name"] = None
 
             if file_info:
-                any_renamed = True
                 media_rename_lists[item["media_id"]] = rename_response
 
             if rename_folders:
@@ -544,39 +613,50 @@ def process_instance(
                         "been accepted by %s. Run with --debug for details.", app.name
                     )
                 else:
-                    # Dynamic timeout: 30s base plus 2s per file, capped at
-                    # 120s. The cap is intentional — evidence shows the command
-                    # status delay in Sonarr is roughly fixed regardless of
-                    # file count, and verify_renames is the real check anyway.
+                    # Poll verify_renames directly rather than command status —
+                    # Radarr/Sonarr can be slow to mark commands as completed
+                    # even when the actual rename finished in seconds, causing
+                    # misleading timeout warnings. The rename list is the
+                    # source of truth: empty means done.
                     total_files_to_rename = sum(
                         len(rlist) for rlist in media_rename_lists.values()
                     )
-                    dynamic_timeout = min(120, 30 + total_files_to_rename * 2)
+                    max_wait = min(120, 30 + total_files_to_rename * 2)
                     logger.info(
                         "Waiting for file rename to complete "
                         "(%d file(s), timeout %ds)…",
-                        total_files_to_rename, dynamic_timeout,
+                        total_files_to_rename, max_wait,
                     )
-                    completed = app.wait_for_commands(command_ids, timeout=dynamic_timeout)
-                    logger.info("File rename %s.", "completed" if completed else "timed out")
-
-                    logger.info("Verifying file renames…")
-                    remaining = app.verify_renames(list(media_rename_lists.keys()))
-                    if remaining:
-                        for media_id, leftover in remaining.items():
+                    verified = app.verify_rename_with_retry(
+                        list(media_rename_lists.keys()), max_wait=max_wait
+                    )
+                    if verified:
+                        logger.info("All file renames verified successfully.")
+                    else:
+                        logger.warning(
+                            "File rename verification failed — "
+                            "the following files may not have been renamed:"
+                        )
+                        for media_id, leftover in app.verify_renames(
+                            list(media_rename_lists.keys())
+                        ).items():
                             for r in leftover:
                                 logger.warning(
-                                    "File not renamed — still needs rename: %s",
+                                    "  Still needs rename: %s",
                                     _clean_path(r.get("existingPath", "")),
                                 )
-                    else:
-                        logger.info("All file renames verified successfully.")
 
                 logger.info("Triggering post-file-rename refresh…")
-                refresh_ids = app.refresh_items(list(media_rename_lists.keys()))
-                if refresh_ids:
-                    refresh_timeout = min(120, 30 + len(media_rename_lists) * 5)
-                    app.wait_for_commands(refresh_ids, timeout=refresh_timeout)
+                app.refresh_items(list(media_rename_lists.keys()))
+                file_refresh_wait = min(120, 30 + len(media_rename_lists) * 10)
+                logger.info(
+                    "Waiting for Radarr/Sonarr to confirm files found "
+                    "after rename (%d item(s), timeout %ds)…",
+                    len(media_rename_lists), file_refresh_wait,
+                )
+                app.wait_for_files_found(
+                    list(media_rename_lists.keys()), max_wait=file_refresh_wait
+                )
             else:
                 logger.info("No files need renaming in this chunk.")
 
@@ -593,9 +673,6 @@ def process_instance(
             # ── rename folders ────────────────────────────────────────────────
             if rename_folders and grouped_root_folders:
                 logger.info("Renaming folders in %s…", app.name)
-                all_folder_ids: List[int] = [
-                    mid for ids in grouped_root_folders.values() for mid in ids
-                ]
                 for root_folder, folder_ids in grouped_root_folders.items():
                     app.rename_folders(folder_ids, root_folder)
 
@@ -615,12 +692,29 @@ def process_instance(
                         )
 
                 # Only fire a rescan refresh when folders actually moved so
-                # Radarr/Sonarr picks up files at the new location. This is
-                # fire-and-forget — the DB is already correct, the rescan
-                # just confirms the files are present.
+                # Radarr/Sonarr picks up files at the new location. Wait for
+                # the refresh to complete before finishing — this closes the
+                # window where external tools (e.g. Notifiarr) can pick up a
+                # spurious MissingFromDisk event before Radarr has rescanned
+                # the new path and confirmed the files are there.
                 if actually_renamed:
                     logger.info("Triggering post-folder-rename refresh…")
                     app.refresh_items(actually_renamed)
+                    folder_wait    = min(120, 30 + len(actually_renamed) * 10)
+                    expected_paths = {
+                        item["media_id"]: item["new_path_name"]
+                        for item in chunk if item.get("new_path_name")
+                    }
+                    logger.info(
+                        "Waiting for Radarr/Sonarr to confirm files found "
+                        "at new location (%d item(s), timeout %ds)…",
+                        len(actually_renamed), folder_wait,
+                    )
+                    app.wait_for_files_found(
+                        actually_renamed,
+                        expected_paths=expected_paths,
+                        max_wait=folder_wait,
+                    )
 
         # ── collect results ───────────────────────────────────────────────────
         total_files   = sum(len(i.get("file_info", {})) for i in chunk)
@@ -715,6 +809,7 @@ def send_discord_notification(
     results: Dict[str, Dict[str, Any]],
     dry_run: bool,
     logger: logging.Logger,
+    latest_version: Optional[str] = None,
 ) -> None:
     """
     Post a rename summary embed to a Discord webhook.
@@ -791,6 +886,13 @@ def send_discord_notification(
         logger.debug("Discord: nothing to report, skipping notification.")
         return
 
+    if latest_version:
+        fields.insert(0, {
+            "name":   "🆕 Update available",
+            "value":  f"v{VERSION} → v{latest_version}\n[Download from GitHub]({GITHUB_RELEASE_URL})",
+            "inline": False,
+        })
+
     title = "✏️ Renameinatorr"
     if dry_run:
         title += "  `[DRY RUN]`"
@@ -864,6 +966,15 @@ def main() -> None:
 
     logger.info("renameinatorr v%s", VERSION)
 
+    latest_version = check_for_update(logger)
+    if latest_version:
+        logger.warning(
+            "Update available: v%s → v%s  %s",
+            VERSION, latest_version, GITHUB_RELEASE_URL,
+        )
+    else:
+        logger.debug("Version check: already up to date.")
+
     if dry_run:
         logger.info("═" * 50)
         logger.info("DRY RUN – no changes will be made")
@@ -906,7 +1017,7 @@ def main() -> None:
 
     webhook_url = config.get("discord_webhook")
     if webhook_url and all_results:
-        send_discord_notification(webhook_url, all_results, dry_run, logger)
+        send_discord_notification(webhook_url, all_results, dry_run, logger, latest_version)
 
 
 if __name__ == "__main__":

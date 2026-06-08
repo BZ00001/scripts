@@ -8,10 +8,21 @@ All notable changes to `asset_cleanup.py` are documented here.
 
 ---
 
+## [1.4.0] - 2026-06-08
+
+### Added
+- Stale duplicate detection after a rename in Sonarr or Radarr. When multiple asset folders share the same ID tag (e.g. `{tvdb-334149}`), the script constructs the expected folder name and removes any folder whose name no longer matches. This cleans up the old-named folder left behind after a title change without touching any entry where no exact match can be determined.
+
+### Fixed
+- Stale duplicate detection now uses the `path` field from the Sonarr/Radarr API response to determine the expected folder name, rather than constructing it from the title. The path already has Sonarr's `CleanTitleWithout` transformations applied (e.g. `&` to `and`, apostrophe removal), so the correct folder is kept and the stale one is removed.
+
+---
+
 ## [1.3.0] - 2026-06-07
 
 ### Added
 - `VERSION` constant added near the top of the script. The version is printed in the startup banner (`Asset Cleanup v1.3.0`) and included in the Discord notification footer (`asset_cleanup v1.3.0 | YYYY-MM-DD HH:MM`).
+- Version check against GitHub on every run. If a newer version is available, a warning is printed to the terminal and an upgrade notice field is prepended to the Discord embed, with a link to the release page.
 
 ---
 

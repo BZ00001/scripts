@@ -5,6 +5,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.0] - 2026-06-07
+
+### Added
+- Automatic version check against GitHub on each run.
+- Update notification in terminal log when a newer version is available.
+- Update notification field in Discord embed when a newer version is available, with a link to the release page.
+
+---
+
 ## [1.0.1] - 2026-06-07
 
 ### Changed

@@ -21,7 +21,9 @@ import yaml
 # ============================================================
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "blocklist_cleaner.yml"
-VERSION = "1.0.1"
+VERSION            = "1.1.0"
+GITHUB_RAW_URL     = "https://raw.githubusercontent.com/BZ00001/scripts/main/blocklist_cleaner/blocklist_cleaner.py"
+GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/blocklist_cleaner"
 
 # ============================================================
 # LOGGING
@@ -32,6 +34,33 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=DATE_FORMAT)
 log = logging.getLogger("blocklist_cleaner")
+
+
+# ============================================================
+# VERSION CHECK
+# ============================================================
+
+def _parse_version(v: str) -> tuple:
+    try:
+        return tuple(int(x) for x in v.strip().split("."))
+    except Exception:
+        return (0,)
+
+
+def check_for_update() -> str | None:
+    """Fetch the latest version from GitHub. Returns the newer version string, or None."""
+    try:
+        resp = requests.get(GITHUB_RAW_URL, timeout=10)
+        resp.raise_for_status()
+        for line in resp.text.splitlines():
+            if line.startswith("VERSION"):
+                latest = line.split("=")[1].strip().strip('"\'')
+                if _parse_version(latest) > _parse_version(VERSION):
+                    return latest
+                return None
+    except Exception as exc:
+        log.debug("Version check failed: %s", exc)
+    return None
 
 
 # ============================================================
@@ -110,7 +139,7 @@ class ArrClient:
 # DISCORD
 # ============================================================
 
-def send_discord_notification(webhook_url: str, results: list[dict], dry_run: bool, days: int) -> None:
+def send_discord_notification(webhook_url: str, results: list[dict], dry_run: bool, days: int, latest_version: str | None = None) -> None:
     if not webhook_url:
         return
 
@@ -146,6 +175,13 @@ def send_discord_notification(webhook_url: str, results: list[dict], dry_run: bo
         "footer": {"text": f"blocklist_cleaner v{VERSION} - Total removed: {total_deleted} | Total kept: {total_skipped}"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+    if latest_version:
+        embed["fields"].insert(0, {
+            "name": "🆕 Update available",
+            "value": f"v{VERSION} - v{latest_version}\n[Download from GitHub]({GITHUB_RELEASE_URL})",
+            "inline": False,
+        })
 
     payload = {"embeds": [embed]}
 
@@ -263,6 +299,10 @@ def main() -> None:
 
     log.info("blocklist_cleaner v%s", VERSION)
 
+    latest_version = check_for_update()
+    if latest_version:
+        log.info("Update available: v%s - %s", latest_version, GITHUB_RELEASE_URL)
+
     if dry_run:
         log.info("DRY-RUN mode enabled - no changes will be made")
 
@@ -301,7 +341,7 @@ def main() -> None:
             log.info("[%s] %s %d of %d entries", r["name"], verb, r["deleted"], r["total"])
 
     if discord_webhook:
-        send_discord_notification(discord_webhook, results, dry_run, days)
+        send_discord_notification(discord_webhook, results, dry_run, days, latest_version)
 
 
 if __name__ == "__main__":

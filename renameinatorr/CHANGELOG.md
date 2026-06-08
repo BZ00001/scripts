@@ -3,54 +3,98 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [1.4.3] – 2026-06-07
+## [1.5.1] – 2026-06-08
+
+### Added
+- `wait_for_files_found` method — polls `GET /movie/{id}` or `GET /series/{id}` and checks
+  `hasFile: true` (Radarr) or `episodeFileCount > 0` (Sonarr) until files are confirmed present.
+  Accepts an optional `expected_paths` dict to also verify the record path matches the expected
+  new location, used after folder renames to confirm Radarr has rescanned the new path rather
+  than just seeing `hasFile: true` from before the move. Always waits at least one poll interval
+  before the first check to guarantee a minimum gap between firing a refresh and proceeding.
+- `verify_rename_with_retry` method — polls the rename list directly after a RenameFiles command
+  and exits as soon as it comes back empty. More reliable than polling command status, which
+  Radarr/Sonarr can be slow to update even when the rename finished in seconds.
+
+### Changed
+- File rename verification now uses `verify_rename_with_retry` instead of polling command status.
+  The rename list being empty is the source of truth — command status polling produced misleading
+  timeout warnings even when renames completed successfully.
+- Post-file-rename refresh now waits via `wait_for_files_found` before the folder rename begins,
+  closing the sequencing window that caused spurious MissingFromDisk/Deleted events in external
+  tools like Notifiarr. The folder rename previously started at the same second as the refresh.
+- Post-folder-rename refresh now waits via `wait_for_files_found` with `expected_paths`, ensuring
+  Radarr/Sonarr has confirmed files at the new location before the script exits. Previous
+  approaches using `wait_for_commands` timed out because Radarr never marked the refresh command
+  as completed in time.
+- Post-folder-rename refresh only fires for items where the folder path actually changed, not all
+  items in the chunk. Path changes are detected immediately from the DB after the editor endpoint
+  call rather than waiting for a refresh to complete.
+- `refresh_items` simplified to `None` return type — all refresh calls are fire-and-forget,
+  with `wait_for_files_found` used to confirm outcomes rather than polling command IDs.
 
 ### Fixed
-- Post-rename refresh commands were fire-and-forget, causing Radarr/Sonarr to show renamed media as Missing until a manual Refresh & Scan was triggered. `refresh_items` now returns all command IDs (collecting every per-series command for Sonarr rather than only the last one), and the post-file-rename refresh now polls for completion using the same `wait_for_commands` pattern as file renames. Timeout is `min(120, 30 + items * 5)` seconds.
-- Post-folder-rename refresh was polling all items in the chunk regardless of whether any folders actually changed, causing 80-136s timeouts on clean runs. The folder refresh is now fire-and-forget and only triggered when path changes are actually detected. Path change detection uses the immediate DB state after the editor endpoint call rather than waiting for the refresh to complete, since the editor endpoint updates the DB synchronously.
+- `verify_renames` was accidentally merged into `verify_rename_with_retry` as dead code after a
+  `return` statement. Any call to `app.verify_renames()` would have thrown `AttributeError`.
+- Verification failure log message corrected — was logging at WARNING level with the message
+  "Verifying file renames…" which was confusing. Now logs a clear failure message listing the
+  specific files that did not rename.
+
+### Removed
+- `wait_for_commands` — removed as dead code. All command polling has been replaced by outcome-
+  based checks (`verify_rename_with_retry` for file renames, `wait_for_files_found` for refreshes).
+- `any_renamed` variable — set but never read after refresh gating logic changed.
+- `all_folder_ids` variable — computed but replaced by `actually_renamed` in all call sites.
+
+---
+
+## [1.5.0] – 2026-06-07
+
+### Added
+- Version check at startup. The script fetches the latest version from GitHub on every run and
+  logs a warning if a newer version is available. The update notice also appears as a field at
+  the top of the Discord notification with a link to the release page.
 
 ---
 
 ## [1.4.2] – 2026-06-07
 
 ### Added
-- `VERSION` constant added to the constants section. The version is logged at startup (`renameinatorr vX.X.X`) so it is immediately visible in logs and support reports, making it easier to confirm which version is running.
+- `VERSION` constant and startup log line — version is logged at startup (`renameinatorr vX.X.X`)
+  so it is immediately visible in logs and support reports.
 
 ---
 
 ## [1.4.1] – 2026-06-04
 
 ### Changed
-- File rename polling timeout is now dynamic, calculated as `min(120, 30 + file_count * 2)` seconds. The previous `20 + file_count * 10` formula did not scale — 279 files produced a 2810-second timeout. Since the command status delay in Sonarr is roughly fixed regardless of file count, and `verify_renames` is the real source of truth, the timeout is now capped at 120 seconds. The timeout and file count are logged on each run so the value is visible.
+- File rename polling timeout made dynamic: `min(120, 30 + file_count * 2)` seconds. The previous
+  fixed 120-second base was too aggressive for large batches.
 
 ---
 
 ## [1.4.0] – 2026-06-04
 
 ### Added
-- `refresh_before_rename` per-instance yml setting (default: false). When enabled, forces a metadata refresh from TVDB/TMDB for each item in the chunk before checking the rename list. This ensures title updates are reflected immediately rather than waiting for Sonarr/Radarr's own refresh schedule, at the cost of a slightly longer run time.
-
-### Changed
-- `wait_for_commands` default timeout increased from 60 to 120 seconds. The previous 60-second timeout caused a misleading warning even when the rename had completed successfully on disk, as confirmed by `verify_renames`.
+- `refresh_before_rename` per-instance yml setting (default: false). When enabled, forces a
+  metadata refresh from TVDB/TMDB for each item in the chunk before checking the rename list,
+  ensuring title updates are reflected immediately rather than waiting for the app's own schedule.
+- `rename_media` now returns command IDs for polling.
+- `verify_renames` method — re-checks the rename list after a RenameFiles command to confirm
+  files were actually renamed on disk.
+- Diagnostic logging in `rename_media` to surface cases where no file IDs are extracted from the
+  rename list or where the command response contains no ID.
 
 ### Fixed
-- File renames were fire-and-forget, meaning the script had no way to confirm whether Sonarr/Radarr had actually renamed the file on disk. `rename_media` now returns command IDs, which are polled via `wait_for_commands` and then verified via `verify_renames`. If a file still needs renaming after the command completes, a warning is logged naming the specific file.
-- Diagnostic logging added to `rename_media` to surface cases where no file IDs are found in the rename list, or where Sonarr/Radarr returns a command response with no ID. Both conditions log a warning in normal runs and full detail at DEBUG level.
-- `refresh_before_rename` correctly skips the metadata refresh in dry-run mode.
+- File renames were fire-and-forget with no confirmation. RenameFiles commands are now polled
+  and the rename list is verified before continuing.
 
 ---
 
 ## [1.3.0] – 2026-06-03
 
-### Added
-- Version number added to script header (`# version: 1.3`).
-- `wait_for_commands` method — polls all RenameFiles command IDs concurrently until they complete, fail, or a 60-second timeout elapses. File renames are now confirmed before the script moves on.
-- `verify_renames` method — after a RenameFiles command completes, re-checks the rename list for each affected series/movie. Any files still needing a rename are logged as warnings, making it clear when a rename did not take effect on disk.
-- `rename_media` now returns a list of command IDs so the caller can poll for completion.
-
 ### Fixed
-- File renames were fire-and-forget, so the script had no way to confirm they completed. RenameFiles commands are now polled and verified before continuing.
-- Dead `_put_with_move` method removed — it was left over from a previous approach and was never called.
+- Dead `_put_with_move` method removed.
 - Em-dash in Discord notification header replaced with a hyphen.
 
 ---
@@ -58,72 +102,44 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [1.2.0] – 2026-06-01
 
 ### Fixed
-- `datetime.datetime.utcnow()` replaced with `datetime.datetime.now(datetime.timezone.utc)` in the Discord notification — `utcnow()` was deprecated in Python 3.12 and produced a visible warning in Unraid User Scripts logs.
+- `datetime.datetime.utcnow()` replaced with `datetime.datetime.now(datetime.timezone.utc)` —
+  `utcnow()` was deprecated in Python 3.12 and produced a visible warning in Unraid User Scripts.
 
 ---
 
 ## [1.1.0] – 2026-05-31
 
 ### Added
-- `--title` CLI flag for processing a single item by title substring (case-insensitive). Also available as `title_filter` per-instance in the yml for Unraid User Scripts users who cannot pass CLI arguments.
-- Discord notification now always sent after every run — instances with nothing to rename show `✅ No items needed renaming (N checked)` instead of being omitted.
-- Discord notification now shows total checked and total changed per instance (`X / Y changed`).
-- Discord notification now splits file renames and folder renames into separate embed fields per instance for easier reading.
+- `--title` CLI flag and `title_filter` yml setting for processing a single item by title
+  substring, useful for testing before a full library run.
+- Discord notification now always sent — instances with nothing to rename show
+  `✅ No items needed renaming (N checked)`.
+- Discord notification shows total checked and total changed per instance (`X / Y changed`).
+- Discord notification splits file renames and folder renames into separate embed fields.
 
 ### Changed
-- **Native folder renaming** — folder renaming now delegates entirely to Radarr / Sonarr via the `movie/editor` and `series/editor` endpoints with `moveFiles: true` and the item's existing `rootFolderPath`. The app applies its own naming format, colon replacement, illegal character handling, CleanTitle logic, and all other token expansions. The previous Python reimplementation of the naming logic has been removed (~180 lines).
-- **`Using count=` log line** moved to directly below the instance header so it reads in natural order.
-- **Dry-run folder preview** updated to reflect the native approach — shows how many items would be submitted for folder renaming rather than a per-item `X → Y` preview, which is no longer possible without reimplementing the naming logic.
-- `rename_folders` yml comment updated to document the dry-run limitation.
-- `get_effective_count` simplified — logging moved inline to `process_instance`.
-
-### Removed
-- All Python naming-logic helpers: `_format_folder_name`, `_clean_title`, `_arr_clean_title`, `_colon_replacement`, `_with_year`, `_move_the`. These were fragile reimplementations of Sonarr/Radarr's internal `FileNameBuilder.cs` logic and are superseded by the native editor endpoint approach.
-- `get_naming_config()` API method — no longer needed.
-- `_put_with_move()` — replaced by the editor endpoint which handles physical folder moves natively.
-- `naming_config` fetch from `process_instance` — no longer fetched or passed through.
+- **Native folder renaming** — folder renaming now delegates entirely to Radarr/Sonarr via the
+  `movie/editor` and `series/editor` endpoints with `moveFiles: true`. The app applies its own
+  naming format, token expansion, colon replacement, and illegal character handling. The previous
+  Python reimplementation of the naming logic (~180 lines) has been removed.
+- `Using count=` log line moved to directly below the instance header.
+- Dry-run folder preview shows item count only — per-item `X → Y` preview is not possible
+  without reimplementing the naming logic.
 
 ### Fixed
-- `{Series CleanTitle}` / `{Movie CleanTitle}` tokens were previously mapped to the same value as the regular title. Now handled correctly by the app itself via the native approach.
-- `{Series CleanTitleWithoutYear}` and similar unhandled tokens caused literal token strings to appear in folder names (e.g. `[{Series CleanTitleWithoutYear} (2023)]`). Now handled correctly by the app.
-- Illegal character replacement (`replaceIllegalCharacters` setting) was not respected — the script always stripped characters rather than replacing them per the app's configured mapping (e.g. `/` → `+`). Now handled correctly by the app.
-- Colon replacement mode (`colonReplacementFormat`) was applied uniformly; Smart mode's distinction between `: ` and `:` was not implemented correctly. Now handled correctly by the app.
-- `+` was incorrectly added to the illegal character strip set, causing titles like `Fate/Zero` to become `FateZero` instead of `Fate+Zero`. Now handled correctly by the app.
+- Naming tokens (`{Series CleanTitle}`, `{Series CleanTitleWithoutYear}`, `{Release Year}`, etc.)
+  were not expanded correctly — now handled natively by the app.
+- Illegal character replacement (`replaceIllegalCharacters` setting) was not respected.
+- Colon replacement mode (`colonReplacementFormat`) Smart mode not handled correctly.
+- Cycling tag logic — `media_list` was not filtered to untagged items, causing every run to
+  reprocess the full library.
+- Tag now applied to all items in the chunk regardless of whether files or folders were renamed.
 
 ---
 
 ## [1.0.0] – 2026-05-25
 
 ### Added
-- `ignore_tag` support — items with this tag are always skipped, even after a cycle reset.
-- `title_filter` yml key per instance for testing a single item without CLI access.
-- Discord webhook notifications with old → new names shown for both file and folder renames.
-- Folder rename detection — after rename, `get_parsed_media()` is called to detect and log actual path changes.
-- Cycling tag logic — `tag_name` tag is applied to every processed item; when all items are tagged the tag is cleared and the cycle restarts.
-- Per-item error handling in folder rename — one failed PUT no longer aborts remaining items in the chunk.
-
-### Changed
-- **Radarr folder renaming** switched from `RenameMovie` command (which only renames episode files, not the folder) to `PUT /movie/{id}`, matching the Sonarr approach.
-- **Command polling removed** — `wait_for_command`, `DEFAULT_CMD_TIMEOUT`, and `command_timeout` removed. All folder renames are now fire-and-forget; the rename itself is synchronous and polling the refresh command is unnecessary.
-- **Post-file-rename refresh** made fire-and-forget — was previously polled, causing 2-minute timeouts when Sonarr was slow to respond.
-- **Post-folder-rename refresh** only triggered when at least one folder was actually renamed.
-- `get_rename_list` called once per item and results cached — previously called a second time inside `rename_media`, doubling API calls.
-- `rename_media` signature changed to accept pre-collected rename-list dicts instead of re-fetching.
-- `Using count=0` log message changed to `Using count=all` for clarity.
-- Tag now applied to all items in the chunk, not just those with file renames — items with only folder renames or nothing to do are correctly tagged and skipped on the next run.
-- Double year in log output and Discord notifications fixed — title display now checks whether the year is already present before appending.
-
-### Fixed
-- `RenameSeries` Sonarr command does not rename folders — only episode files. Replaced with `PUT /series/{id}` approach.
-- `RenameMovie` Radarr command does not rename folders — only movie files. Replaced with `PUT /movie/{id}` approach.
-- `moveFiles=true` query parameter added to PUT calls — without it the PUT was a DB-only update and did not physically move the folder on disk.
-- `_put` method accidentally removed when `_put_with_move` was added, causing `AttributeError` in `add_tags` and `remove_tags`.
-- `{Release Year}` Radarr token was unhandled, causing every movie to appear to need folder renaming.
-- `{Edition Tags}` and `{Edition}` Radarr tokens added.
-- Radarr folder rename previously hung indefinitely for movies with no files on disk (e.g. upcoming titles). These are now skipped.
-- `ready` variable was unbound if `response.get("id")` was falsy — initialised to `False` before conditional assignment.
-- Unicode apostrophe normalisation (`'` → `'`) added to prevent spurious folder renames caused by curly vs straight quote mismatches between the API and the filesystem.
-- Cycling tag logic fixed — `media_list` was not filtered to untagged items after the cycle check, causing every run to reprocess the full library.
-- `rename_folders` return value for Radarr now correctly tracks whether any PUT was made instead of returning `True` unconditionally.
-- Folder rename decoupled from file rename — a folder can now be renamed even when all episode/movie files are already correctly named.
-
+- Initial standalone release. Radarr and Sonarr file and folder renaming with cycling tag logic,
+  chunked processing, Discord webhook notifications, dry-run mode, ignore tag support, and
+  per-instance configuration via yml.

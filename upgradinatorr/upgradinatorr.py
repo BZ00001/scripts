@@ -74,11 +74,43 @@ import requests
 import yaml
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Version check
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_version(v: str) -> tuple:
+    """Parse a version string into a tuple of ints for comparison."""
+    try:
+        return tuple(int(x) for x in v.strip().split("."))
+    except Exception:
+        return (0,)
+
+
+def check_for_update(logger) -> Optional[str]:
+    """
+    Fetch the latest version from GitHub and return it if newer than the
+    running version, or None if already up to date or the check failed.
+    """
+    try:
+        resp = requests.get(GITHUB_RAW_URL, timeout=10)
+        resp.raise_for_status()
+        for line in resp.text.splitlines():
+            if line.startswith("VERSION"):
+                latest = line.split("=")[1].strip().strip('"\'  ')
+                if _parse_version(latest) > _parse_version(VERSION):
+                    return latest
+                return None
+    except Exception as exc:
+        logger.debug("Version check failed: %s", exc)
+    return None
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
 VALID_STATUSES = {"continuing", "airing", "ended", "canceled", "released"}
-VERSION = "1.2.1"
+VERSION            = "1.3.0"
+GITHUB_RAW_URL     = "https://raw.githubusercontent.com/BZ00001/scripts/main/upgradinatorr/upgradinatorr.py"
+GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/upgradinatorr"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "dry_run": False,
@@ -675,6 +707,7 @@ def send_discord_notification(
     results: Dict[str, Optional[Dict]],
     dry_run: bool,
     logger: logging.Logger,
+    latest_version: Optional[str] = None,
 ) -> None:
     """
     Post a summary embed to a Discord webhook.
@@ -718,6 +751,13 @@ def send_discord_notification(
     if not fields:
         logger.debug("Discord: nothing to report, skipping notification.")
         return
+
+    if latest_version:
+        fields.insert(0, {
+            "name":   "🆕 Update available",
+            "value":  f"v{VERSION} → v{latest_version}\n[Download from GitHub]({GITHUB_RELEASE_URL})",
+            "inline": False,
+        })
 
     title = "🔍 Upgradinatorr"
     if dry_run:
@@ -775,6 +815,13 @@ def main() -> None:
     log_level = "DEBUG" if args.debug else config.get("log_level", "INFO")
     logger = setup_logging(log_level)
     logger.info("upgradinatorr v%s", VERSION)
+
+    latest_version = check_for_update(logger)
+    if latest_version:
+        logger.info("═" * 50)
+        logger.info("Update available: v%s → v%s", VERSION, latest_version)
+        logger.info("Download: %s", GITHUB_RELEASE_URL)
+        logger.info("═" * 50)
 
     dry_run: bool = args.dry_run or config.get("dry_run", False)
 
@@ -844,7 +891,7 @@ def main() -> None:
 
     webhook_url = config.get("discord_webhook")
     if webhook_url and all_results:
-        send_discord_notification(webhook_url, all_results, dry_run, logger)
+        send_discord_notification(webhook_url, all_results, dry_run, logger, latest_version)
 
 if __name__ == "__main__":
     try:

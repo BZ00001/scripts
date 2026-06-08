@@ -7,7 +7,9 @@ Radarr (TMDB), Sonarr (TVDB), or Plex collections.
 Config: asset_cleanup.yml (same directory as this script)
 """
 
-VERSION = "1.3.0"
+VERSION            = "1.4.0"
+GITHUB_RAW_URL     = "https://raw.githubusercontent.com/BZ00001/scripts/main/asset_cleanup/asset_cleanup.py"
+GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/asset_cleanup"
 
 import os
 import re
@@ -20,6 +22,34 @@ from datetime import datetime
 
 import requests
 import yaml
+
+# ─── Version check ───────────────────────────────────────────────────────────
+
+def _parse_version(v: str) -> tuple:
+    """Parse a version string into a tuple of ints for comparison."""
+    try:
+        return tuple(int(x) for x in v.strip().split("."))
+    except Exception:
+        return (0,)
+
+
+def check_for_update(logger) -> str | None:
+    """
+    Fetch the latest version from GitHub and return it if newer than the
+    running version, or None if already up to date or the check failed.
+    """
+    try:
+        resp = requests.get(GITHUB_RAW_URL, timeout=10)
+        resp.raise_for_status()
+        for line in resp.text.splitlines():
+            if line.startswith("VERSION"):
+                latest = line.split("=")[1].strip().strip('"\'\' ')
+                if _parse_version(latest) > _parse_version(VERSION):
+                    return latest
+                return None
+    except Exception as exc:
+        logger.debug(f"Version check failed: {exc}")
+    return None
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 
@@ -136,10 +166,13 @@ def _normalise_instances(cfg_value) -> list[dict]:
     return cfg_value or []
 
 
-def get_radarr_data(instances: list[dict]) -> tuple[set[int], set[str]]:
-    """Return combined (tmdb_ids, normalised_titles) across all Radarr instances."""
-    all_ids:    set[int] = set()
-    all_titles: set[str] = set()
+def get_radarr_data(instances: list[dict]) -> tuple[set[int], set[str], dict[int, dict]]:
+    """Return combined (tmdb_ids, normalised_titles, id_to_info) across all Radarr instances.
+    id_to_info maps tmdb_id -> {"title": str, "year": int|None}.
+    """
+    all_ids:    set[int]      = set()
+    all_titles: set[str]      = set()
+    all_info:   dict[int, dict] = {}
     for inst in instances:
         name    = inst.get("name", inst["url"])
         resp    = requests.get(
@@ -153,14 +186,27 @@ def get_radarr_data(instances: list[dict]) -> tuple[set[int], set[str]]:
         titles = {_normalise_name(m["title"]) for m in movies if m.get("title")}
         all_ids    |= ids
         all_titles |= titles
+        for m in movies:
+            if m.get("tmdbId"):
+                # Use the actual folder name from Radarr's path - it already has
+                # all of Radarr's CleanTitle transformations applied.
+                folder_name = Path(m["path"]).name if m.get("path") else None
+                all_info[m["tmdbId"]] = {
+                    "title":       m.get("title", ""),
+                    "year":        m.get("year"),
+                    "folder_name": folder_name,
+                }
         log.info(f"Radarr [{name}]: {len(ids):,} movies loaded")
-    return all_ids, all_titles
+    return all_ids, all_titles, all_info
 
 
-def get_sonarr_data(instances: list[dict]) -> tuple[set[int], set[str]]:
-    """Return combined (tvdb_ids, normalised_titles) across all Sonarr instances."""
-    all_ids:    set[int] = set()
-    all_titles: set[str] = set()
+def get_sonarr_data(instances: list[dict]) -> tuple[set[int], set[str], dict[int, dict]]:
+    """Return combined (tvdb_ids, normalised_titles, id_to_info) across all Sonarr instances.
+    id_to_info maps tvdb_id -> {"title": str, "year": int|None}.
+    """
+    all_ids:    set[int]      = set()
+    all_titles: set[str]      = set()
+    all_info:   dict[int, dict] = {}
     for inst in instances:
         name = inst.get("name", inst["url"])
         resp = requests.get(
@@ -174,8 +220,18 @@ def get_sonarr_data(instances: list[dict]) -> tuple[set[int], set[str]]:
         titles = {_normalise_name(s["title"]) for s in series if s.get("title")}
         all_ids    |= ids
         all_titles |= titles
+        for s in series:
+            if s.get("tvdbId"):
+                # Use the actual folder name from Sonarr's path - it already has
+                # all of Sonarr's CleanTitleWithout transformations applied.
+                folder_name = Path(s["path"]).name if s.get("path") else None
+                all_info[s["tvdbId"]] = {
+                    "title":       s.get("title", ""),
+                    "year":        s.get("year"),
+                    "folder_name": folder_name,
+                }
         log.info(f"Sonarr [{name}]: {len(ids):,} series loaded")
-    return all_ids, all_titles
+    return all_ids, all_titles, all_info
 
 
 def get_plex_collection_names(url: str, token: str) -> set[str]:
@@ -224,6 +280,28 @@ def _extract_title(name: str) -> str:
     return _normalise_name(m.group(1) if m else name)
 
 
+def _expected_folder_name(info: dict, kind: str, eid: int) -> str:
+    """Construct the canonical asset folder name Kometa would create.
+
+    Prefers the folder name from the Sonarr/Radarr path field, which already
+    has all of the arr's CleanTitleWithout transformations applied (e.g.
+    '&' to 'and', apostrophe removal, etc.). Falls back to constructing from
+    title + year with a basic '&' substitution if no path is available.
+    """
+    tag = f"{{tvdb-{eid}}}" if kind == "tvdb" else f"{{tmdb-{eid}}}"
+    folder = info.get("folder_name")
+    if folder:
+        # Strip any existing ID tag from the folder name before appending,
+        # in case Radarr/Sonarr already includes it in their path.
+        folder_base = re.sub(r"\s*\{(?:tvdb|tmdb)-\d+\}\s*$", "", folder, flags=re.IGNORECASE).strip()
+        return f"{folder_base} {tag}"
+    # Fallback: construct from title + year
+    title    = info.get("title", "").replace("&", "and")
+    year     = info.get("year")
+    year_str = f" ({year})" if year else ""
+    return f"{title}{year_str} {tag}"
+
+
 def classify_entry(name: str) -> tuple[str, int | None]:
     """
     Returns one of:
@@ -256,8 +334,10 @@ def scan_asset_dir(
     skip_dirs: set[Path],
     radarr_ids: set[int],
     radarr_titles: set[str],
+    radarr_info: dict[int, dict],
     sonarr_ids: set[int],
     sonarr_titles: set[str],
+    sonarr_info: dict[int, dict],
     plex_names: set[str],
     ignore_set: set[str],
 ) -> tuple[list[Path], list[Path], list[Path], list[Path]]:
@@ -353,6 +433,39 @@ def scan_asset_dir(
             else:
                 unknown.append(entry)
 
+    # ── Duplicate ID detection (stale names after rename in Sonarr/Radarr) ──
+    # Group all kept entries by their resolved ID. If multiple folders share
+    # the same ID, only the one whose name matches the current Sonarr/Radarr
+    # title is kept; the rest are stale leftovers from a prior rename.
+    from collections import defaultdict
+    id_groups: dict[tuple, list[Path]] = defaultdict(list)
+    for entry in list(keep):
+        ekind, eid = classify_entry(entry.name)
+        if ekind in ("tmdb", "tvdb") and eid is not None:
+            id_groups[(ekind, eid)].append(entry)
+
+    for (ekind, eid), entries in id_groups.items():
+        if len(entries) <= 1:
+            continue
+        # Build the expected folder name from Sonarr/Radarr metadata
+        info = (sonarr_info if ekind == "tvdb" else radarr_info).get(eid)
+        if not info:
+            continue
+        expected = _expected_folder_name(info, ekind, eid)
+        expected_lower = expected.lower()
+        # Find entries that exactly match the expected name (case-insensitive)
+        matching  = [e for e in entries if e.name.lower() == expected_lower]
+        stale     = [e for e in entries if e.name.lower() != expected_lower]
+        if matching:
+            # At least one entry matches the current name - remove the stale ones
+            for entry in stale:
+                keep.remove(entry)
+                remove.append(entry)
+                log.debug(f"  Stale duplicate after rename: {entry.name} -> {expected}")
+        else:
+            # None match exactly - could be a Kometa naming variation; keep all
+            log.debug(f"  Duplicate ID {ekind}-{eid} but no exact name match, keeping all")
+
     return keep, remove, unknown, ignored
 
 
@@ -419,6 +532,7 @@ def send_discord(
     per_dir: list[dict],
     all_remove: list[Path],
     all_unknown: list[Path],
+    latest_version: str | None = None,
 ) -> None:
     if not webhook_url:
         return
@@ -439,7 +553,14 @@ def send_discord(
         else "kept"
     )
 
-    fields = [
+    fields = []
+    if latest_version:
+        fields.append({
+            "name":   "🆕 Update available",
+            "value":  f"v{VERSION} -> v{latest_version}\n[Download from GitHub]({GITHUB_RELEASE_URL})",
+            "inline": False,
+        })
+    fields += [
         {"name": f"{action} (orphaned)", "value": str(len(all_remove)), "inline": True},
         {"name": f"⚠️ Unknown ({unknown_label})", "value": str(len(all_unknown)), "inline": True},
     ]
@@ -512,11 +633,18 @@ def main() -> None:
     print(f"{CYAN}{BOLD}  Asset Cleanup v{VERSION}{RESET}  {mode_label}{unknown_label}")
     print(f"{CYAN}{BOLD}{'─'*60}{RESET}\n")
 
+    # ── Version check ───────────────────────────────────────────────────────
+    latest_version = check_for_update(log)
+    if latest_version:
+        log.warning(f"Update available: v{VERSION} -> v{latest_version}  {GITHUB_RELEASE_URL}")
+    else:
+        log.debug(f"asset_cleanup v{VERSION} is up to date.")
+
     # ── Fetch API data ───────────────────────────────────────────────────────
     log.info("Fetching data from Radarr, Sonarr and Plex …")
     try:
-        radarr_ids, radarr_titles = get_radarr_data(_normalise_instances(cfg.get("radarr", [])))
-        sonarr_ids, sonarr_titles = get_sonarr_data(_normalise_instances(cfg.get("sonarr", [])))
+        radarr_ids, radarr_titles, radarr_info = get_radarr_data(_normalise_instances(cfg.get("radarr", [])))
+        sonarr_ids, sonarr_titles, sonarr_info = get_sonarr_data(_normalise_instances(cfg.get("sonarr", [])))
         plex_names                = get_plex_collection_names(cfg["plex"]["url"], cfg["plex"]["token"])
     except requests.RequestException as exc:
         log.error(f"API error: {exc}")
@@ -546,8 +674,8 @@ def main() -> None:
 
         keep, remove, unknown, ignored = scan_asset_dir(
             asset_dir, skip_dirs,
-            radarr_ids, radarr_titles,
-            sonarr_ids, sonarr_titles,
+            radarr_ids, radarr_titles, radarr_info,
+            sonarr_ids, sonarr_titles, sonarr_info,
             plex_names, ignore_set,
         )
 
@@ -669,7 +797,7 @@ def main() -> None:
     notify_dry  = discord_cfg.get("notify_on_dry_run", True)
 
     if webhook and (not dry_run or notify_dry):
-        send_discord(webhook, dry_run, delete_unknown, per_dir, all_remove, all_unknown)
+        send_discord(webhook, dry_run, delete_unknown, per_dir, all_remove, all_unknown, latest_version)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,16 @@ The original module was written by [Drazzilb08](https://github.com/Drazzilb08/da
 
 ---
 
+## [1.3.0] - 2026-06-07
+
+### Added
+- **Version check at startup.** The script fetches its own source from GitHub on each run and compares the `VERSION` constant. If a newer version is available, a notice is printed to the terminal log and prepended to the Discord notification as a dedicated "Update available" field with a link to the release page.
+- `GITHUB_RAW_URL` and `GITHUB_RELEASE_URL` constants for the version check and update link.
+- `_parse_version()` helper to compare semver strings as integer tuples.
+- `check_for_update()` function; failures are logged at DEBUG level and silently skipped so a network hiccup never interrupts a run.
+
+---
+
 ## [1.2.1] - 2026-06-07
 
 ### Added
