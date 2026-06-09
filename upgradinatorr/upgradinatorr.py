@@ -108,7 +108,7 @@ def check_for_update(logger) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 VALID_STATUSES = {"continuing", "airing", "ended", "canceled", "released"}
-VERSION            = "1.3.0"
+VERSION            = "1.3.1"
 GITHUB_RAW_URL     = "https://raw.githubusercontent.com/BZ00001/scripts/main/upgradinatorr/upgradinatorr.py"
 GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/upgradinatorr"
 
@@ -307,13 +307,24 @@ class ArrClient:
         """Fetch episode list for one series.
 
         Uses its own session so it is safe to call from multiple threads.
+        Retries up to 3 times with a short back-off on transient failures.
         """
-        session = requests.Session()
-        session.headers.update({"X-Api-Key": self.api_key, "Content-Type": "application/json"})
         url = f"{self.base}/api/v3/episode"
-        r = session.get(url, params={"seriesId": series_id}, timeout=30)
-        r.raise_for_status()
-        episodes = r.json()
+        headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
+        last_exc: Exception = RuntimeError("no attempts made")
+        for attempt in range(3):
+            try:
+                session = requests.Session()
+                session.headers.update(headers)
+                r = session.get(url, params={"seriesId": series_id}, timeout=30)
+                r.raise_for_status()
+                episodes = r.json()
+                break
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(2 ** attempt)  # 1s, 2s, 4s
+        else:
+            raise last_exc
 
         episodes_by_season: Dict[int, List[Dict]] = {}
         for ep in episodes:
@@ -548,8 +559,12 @@ def process_instance(
         media_list, checked_tag_id, ignore_tag_id, count, season_threshold, logger,
     )
 
-    # Unattended: if nothing left, wipe tags and start fresh
-    if not filtered and unattended:
+    # Unattended: if nothing left to search, wipe tags and start fresh.
+    # Check that every item is actually tagged before resetting - an empty
+    # filter result can also mean all remaining untagged items fail the season
+    # threshold, in which case a reset would skip them permanently.
+    all_tagged = all(checked_tag_id in item["tags"] for item in media_list)
+    if not filtered and unattended and all_tagged:
         logger.info("All media tagged – clearing tags for unattended cycle.")
         all_ids = [m["media_id"] for m in media_list]
         if not dry_run:

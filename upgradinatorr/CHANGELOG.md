@@ -5,6 +5,13 @@ The original module was written by [Drazzilb08](https://github.com/Drazzilb08/da
 
 ---
 
+## [1.3.1] - 2026-06-09
+
+### Fixed
+- Sonarr occasionally processing fewer items than `count` specifies. Parallel episode fetching (10 workers) could produce transient failures under API load. Each failed fetch silently set `seasons = []`, causing the series to be skipped by `filter_media` with "no monitored seasons above threshold" at DEBUG level - invisible at the default INFO log level. `fetch_episode_data` now retries up to 3 times with exponential back-off (1s, 2s, 4s) before giving up.
+
+---
+
 ## [1.3.0] - 2026-06-07
 
 ### Added

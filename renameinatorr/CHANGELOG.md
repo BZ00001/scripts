@@ -3,6 +3,81 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.5.2] – 2026-06-09
+
+### Added
+- `file_count` field added to items returned by `get_parsed_media` — tracks
+  the number of files per item (`1` per Radarr movie, `episodeFileCount` for
+  Sonarr series). Used to scale timeouts by total file count rather than item
+  count, ensuring a single series with 500 episodes gets proportionally more
+  time than 10 single-episode folders.
+- `has_file` field added to items returned by `get_parsed_media` — tracks
+  whether a movie/series had files on disk before the rename. Used to skip
+  `wait_for_files_found` for placeholder/upcoming entries that will never
+  satisfy `hasFile: true`, preventing full timeout waits for those items.
+- Large library guidance added to yml comments for `count` and
+  `enable_batching` — recommends keeping `count` at 50-100 for libraries
+  with 1000+ items, and warns against setting `count: 0` with
+  `enable_batching: true` on large libraries.
+
+### Changed
+- `rename_media` now uses instance-aware strategies. Radarr fires all
+  RenameFiles commands simultaneously then runs a single `verify_renames`
+  pass across all movies — movies are single-file and Radarr processes them
+  near-instantly so the cold-queue problem does not apply, and serializing
+  one movie at a time was unnecessarily slow for large libraries. Sonarr
+  remains serialized one series at a time with inline verification per series
+  and a timeout of `max(30, file_count * 5)` — a single large series (e.g.
+  The Simpsons at 339 files) can block everything queued behind it if commands
+  are fired simultaneously. Radarr bulk verify timeout is
+  `max(30, movie_count * 2)` seconds.
+- Post-file-rename refresh is now skipped when folder renames are pending in
+  the same chunk. With the serialised `rename_media` approach, Sonarr's
+  episodefile records are updated directly by the RenameFiles command and
+  confirmed via inline `verify_renames` — no rescan is needed before folder
+  renames proceed. Firing an intermediate refresh while folder renames are
+  pending caused Sonarr's rescan to collide with the folder move, producing
+  spurious MissingFromDisk events. When no folder renames are pending the
+  post-file-rename refresh still fires as before.
+- All timeout hard caps removed. Previously `wait_for_files_found` and related
+  methods were capped at fixed maximums. Caps are now removed so timeouts scale
+  linearly with file counts, ensuring `count: 0` runs on very large libraries
+  complete correctly without timing out.
+- `folder_wait` for `wait_for_files_found` now scales by total file count
+  across renamed folders rather than folder count, using a `files * 2`
+  formula. Log message updated to show both file count and folder count.
+
+### Fixed
+- Critical: post-file-rename refresh collided with folder renames when both
+  were needed in the same chunk. Sonarr's rescan triggered by the intermediate
+  refresh was still running when folder renames fired, causing MissingFromDisk
+  events across all affected series. Fixed by skipping the intermediate refresh
+  when folder renames are pending — the post-folder-rename refresh covers both
+  operations once everything has moved.
+- `wait_for_files_found` now always waits at least one poll interval before
+  the first check, guaranteeing a minimum gap between firing a refresh and
+  proceeding even when `hasFile` was already satisfied before the refresh.
+- Folder renames that had no files on disk before the rename no longer
+  trigger a full `wait_for_files_found` timeout.
+- Radarr bulk verify timeout calculation corrected — was iterating over
+  rename-list dicts to compute file count (always equalling movie count for
+  Radarr). Simplified to `len(fired)` which is semantically correct since
+  Radarr movies are single-file.
+
+### Removed
+- `wait_for_renames_settled` — made redundant by the serialised `rename_media`
+  approach. This method polled `GET /episodefile` until old filenames were gone
+  from Sonarr's records before allowing folder renames to proceed. With the
+  serialised approach, `verify_renames` (which polls `GET /rename`) confirms
+  the same thing — episodefile records updated to new filenames — inline per
+  series. Both endpoints reflect the same underlying state; the serialised
+  verify made the separate poll redundant.
+- `verify_rename_with_retry` — replaced by inline verification inside
+  `rename_media`. Each series is now verified immediately after its
+  RenameFiles command completes, making a separate bulk retry step redundant.
+
+---
+
 ## [1.5.1] – 2026-06-08
 
 ### Added

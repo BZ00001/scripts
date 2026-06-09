@@ -74,7 +74,7 @@ SEASON_REGEX = re.compile(r"^Season \d+/", re.IGNORECASE)
 
 DEFAULT_BATCH_SIZE = 100
 
-VERSION           = "1.5.1"
+VERSION           = "1.5.2"
 GITHUB_RAW_URL    = "https://raw.githubusercontent.com/BZ00001/scripts/main/renameinatorr/renameinatorr.py"
 GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/renameinatorr"
 
@@ -229,6 +229,8 @@ class ArrClient:
                     "tags":        m.get("tags", []),
                     "path_name":   m.get("path", ""),
                     "root_folder": m.get("rootFolderPath", ""),
+                    "has_file":    m.get("hasFile", False),
+                    "file_count":  1 if m.get("hasFile") else 0,
                 }
                 for m in raw
             ]
@@ -242,6 +244,8 @@ class ArrClient:
                     "tags":        s.get("tags", []),
                     "path_name":   s.get("path", ""),
                     "root_folder": s.get("rootFolderPath", ""),
+                    "has_file":    s.get("statistics", {}).get("episodeFileCount", 0) > 0,
+                    "file_count":  s.get("statistics", {}).get("episodeFileCount", 0),
                 }
                 for s in raw
             ]
@@ -262,42 +266,112 @@ class ArrClient:
 
     def rename_media(self, media_file_ids: Dict[int, List[Dict]]) -> List[int]:
         """
-        Trigger RenameFiles commands using pre-collected rename-list entries.
+        Trigger RenameFiles commands and verify completion.
 
-        *media_file_ids* maps media_id to raw rename-list dicts, built during
-        the item loop in process_instance to avoid a second API fetch.
+        Radarr: fires all commands simultaneously then verifies all at once.
+        Movies are single-file and Radarr processes them near-instantly, so
+        the cold-queue problem that affects Sonarr does not apply. Bulk firing
+        is significantly faster for large movie libraries.
 
-        Returns a list of command IDs so the caller can poll for completion.
+        Sonarr: fires one series at a time and verifies each before moving on.
+        A single large series (e.g. The Simpsons at 339 files) can block
+        everything queued behind it if commands are fired simultaneously,
+        making bulk timeouts unpredictable.
+
+        Returns a list of media_ids that failed verification. An empty list
+        means all renames succeeded.
         """
-        id_param     = "movieId"     if self.instance_type == "radarr" else "seriesId"
-        file_id_key  = "movieFileId" if self.instance_type == "radarr" else "episodeFileId"
-        command_ids: List[int] = []
+        id_param    = "movieId"     if self.instance_type == "radarr" else "seriesId"
+        file_id_key = "movieFileId" if self.instance_type == "radarr" else "episodeFileId"
+        failed: List[int] = []
 
-        for media_id, rename_list in media_file_ids.items():
-            file_ids = [item[file_id_key] for item in rename_list if file_id_key in item]
-            if not file_ids:
-                self._logger.warning(
-                    "No %s found in rename list for media %d — skipping.",
-                    file_id_key, media_id,
-                )
-                self._logger.debug(
-                    "Rename list keys for media %d: %s",
-                    media_id, [list(item.keys()) for item in rename_list],
-                )
-                continue
-            body = {"name": "RenameFiles", id_param: media_id, "files": file_ids}
-            self._logger.debug("RenameFiles command body: %s", body)
-            resp = self._post("command", body)
-            self._logger.debug("RenameFiles command response: %s", resp)
-            if resp.get("id"):
-                command_ids.append(resp["id"])
-            else:
-                self._logger.warning(
-                    "RenameFiles command for media %d returned no command ID: %s",
-                    media_id, resp,
-                )
+        if self.instance_type == "radarr":
+            # ── Radarr: bulk fire, bulk verify ────────────────────────────────
+            fired: List[int] = []
+            for media_id, rename_list in media_file_ids.items():
+                file_ids = [item[file_id_key] for item in rename_list if file_id_key in item]
+                if not file_ids:
+                    self._logger.warning(
+                        "No %s found in rename list for media %d — skipping.",
+                        file_id_key, media_id,
+                    )
+                    continue
+                body = {"name": "RenameFiles", id_param: media_id, "files": file_ids}
+                self._logger.debug("RenameFiles command body: %s", body)
+                resp = self._post("command", body)
+                self._logger.debug("RenameFiles command response: %s", resp)
+                if not resp.get("id"):
+                    self._logger.warning(
+                        "RenameFiles command for media %d returned no command ID: %s",
+                        media_id, resp,
+                    )
+                fired.append(media_id)
 
-        return command_ids
+            if fired:
+                # For Radarr each movie has exactly one file, so total_files
+                # equals the number of fired commands. The * 2 multiplier
+                # gives 2 seconds per movie, which is generous for near-instant
+                # processing but keeps the timeout proportional to batch size.
+                # Note: with count: 0 all movies fire simultaneously — for very
+                # large libraries consider keeping count at 50-100 to avoid
+                # sending hundreds of commands at once.
+                bulk_wait = max(30, len(fired) * 2)
+                self._logger.info(
+                    "Verifying %d movie rename(s) (timeout %ds)…",
+                    len(fired), bulk_wait,
+                )
+                deadline = time.time() + bulk_wait
+                remaining = self.verify_renames(fired)
+                while remaining and time.time() < deadline:
+                    time.sleep(3)
+                    remaining = self.verify_renames(list(remaining.keys()))
+                if remaining:
+                    failed.extend(remaining.keys())
+
+        else:
+            # ── Sonarr: serialize one series at a time ────────────────────────
+            total = len(media_file_ids)
+            for idx, (media_id, rename_list) in enumerate(media_file_ids.items(), 1):
+                file_ids = [item[file_id_key] for item in rename_list if file_id_key in item]
+                if not file_ids:
+                    self._logger.warning(
+                        "No %s found in rename list for media %d — skipping.",
+                        file_id_key, media_id,
+                    )
+                    self._logger.debug(
+                        "Rename list keys for media %d: %s",
+                        media_id, [list(item.keys()) for item in rename_list],
+                    )
+                    continue
+                body = {"name": "RenameFiles", id_param: media_id, "files": file_ids}
+                self._logger.debug("RenameFiles command body: %s", body)
+                resp = self._post("command", body)
+                self._logger.debug("RenameFiles command response: %s", resp)
+                if not resp.get("id"):
+                    self._logger.warning(
+                        "RenameFiles command for media %d returned no command ID: %s",
+                        media_id, resp,
+                    )
+                per_item_wait = max(30, len(file_ids) * 5)
+                self._logger.info(
+                    "Renaming %d/%d: media %d (%d file(s), timeout %ds)…",
+                    idx, total, media_id, len(file_ids), per_item_wait,
+                )
+                remaining = self.verify_renames([media_id])
+                deadline  = time.time() + per_item_wait
+                while remaining and time.time() < deadline:
+                    time.sleep(3)
+                    remaining = self.verify_renames([media_id])
+                if remaining:
+                    self._logger.warning(
+                        "Media %d: rename did not complete within %ds.",
+                        media_id, per_item_wait,
+                    )
+                    failed.append(media_id)
+                else:
+                    self._logger.debug("Media %d: rename verified.", media_id)
+
+        return failed
 
     def wait_for_files_found(
         self,
@@ -356,26 +430,6 @@ class ArrClient:
             )
             return False
         return True
-
-    def verify_rename_with_retry(
-        self, media_ids: List[int], max_wait: int = 60, interval: int = 3
-    ) -> bool:
-        """
-        Poll verify_renames until all files are confirmed renamed or
-        *max_wait* seconds elapse. Returns True if all renames verified.
-
-        This is more reliable than polling command status since Radarr/Sonarr
-        can be slow to mark commands as completed even when the rename itself
-        finished in seconds.
-        """
-        deadline = time.time() + max_wait
-        while time.time() < deadline:
-            remaining = self.verify_renames(media_ids)
-            if not remaining:
-                return True
-            time.sleep(interval)
-        # Final check after deadline
-        return not self.verify_renames(media_ids)
 
     def verify_renames(self, media_ids: List[int]) -> Dict[int, List[Dict]]:
         """
@@ -604,59 +658,35 @@ def process_instance(
         if not dry_run:
             # ── rename files ──────────────────────────────────────────────────
             if media_rename_lists:
-                logger.info("Renaming files for %d item(s)…", len(media_rename_lists))
-                command_ids = app.rename_media(media_rename_lists)
-
-                if not command_ids:
+                logger.info(
+                    "Renaming files for %d item(s) (one at a time)…",
+                    len(media_rename_lists),
+                )
+                failed_ids = app.rename_media(media_rename_lists)
+                if failed_ids:
                     logger.warning(
-                        "No rename command IDs captured — commands may not have "
-                        "been accepted by %s. Run with --debug for details.", app.name
+                        "%d item(s) did not complete rename within timeout: %s",
+                        len(failed_ids), failed_ids,
                     )
                 else:
-                    # Poll verify_renames directly rather than command status —
-                    # Radarr/Sonarr can be slow to mark commands as completed
-                    # even when the actual rename finished in seconds, causing
-                    # misleading timeout warnings. The rename list is the
-                    # source of truth: empty means done.
-                    total_files_to_rename = sum(
-                        len(rlist) for rlist in media_rename_lists.values()
-                    )
-                    max_wait = min(120, 30 + total_files_to_rename * 2)
-                    logger.info(
-                        "Waiting for file rename to complete "
-                        "(%d file(s), timeout %ds)…",
-                        total_files_to_rename, max_wait,
-                    )
-                    verified = app.verify_rename_with_retry(
-                        list(media_rename_lists.keys()), max_wait=max_wait
-                    )
-                    if verified:
-                        logger.info("All file renames verified successfully.")
-                    else:
-                        logger.warning(
-                            "File rename verification failed — "
-                            "the following files may not have been renamed:"
-                        )
-                        for media_id, leftover in app.verify_renames(
-                            list(media_rename_lists.keys())
-                        ).items():
-                            for r in leftover:
-                                logger.warning(
-                                    "  Still needs rename: %s",
-                                    _clean_path(r.get("existingPath", "")),
-                                )
+                    logger.info("All file renames completed successfully.")
 
-                logger.info("Triggering post-file-rename refresh…")
-                app.refresh_items(list(media_rename_lists.keys()))
-                file_refresh_wait = min(120, 30 + len(media_rename_lists) * 10)
-                logger.info(
-                    "Waiting for Radarr/Sonarr to confirm files found "
-                    "after rename (%d item(s), timeout %ds)…",
-                    len(media_rename_lists), file_refresh_wait,
-                )
-                app.wait_for_files_found(
-                    list(media_rename_lists.keys()), max_wait=file_refresh_wait
-                )
+                # Only fire the post-file-rename refresh when no folder
+                # renames are pending in this chunk. When both file and folder
+                # renames are needed, firing an intermediate refresh causes
+                # Sonarr's rescan to collide with the folder rename — the
+                # rescan runs while folders are moving, producing
+                # MissingFromDisk events. The post-folder-rename refresh
+                # covers the full state update after both operations complete.
+                has_pending_folder_renames = rename_folders and grouped_root_folders
+                if not has_pending_folder_renames:
+                    logger.info("Triggering post-file-rename refresh…")
+                    app.refresh_items(list(media_rename_lists.keys()))
+                else:
+                    logger.info(
+                        "Skipping post-file-rename refresh — folder renames "
+                        "pending, post-folder-rename refresh will cover both."
+                    )
             else:
                 logger.info("No files need renaming in this chunk.")
 
@@ -700,21 +730,35 @@ def process_instance(
                 if actually_renamed:
                     logger.info("Triggering post-folder-rename refresh…")
                     app.refresh_items(actually_renamed)
-                    folder_wait    = min(120, 30 + len(actually_renamed) * 10)
+                    total_folder_files = sum(
+                        item.get("file_count", 1)
+                        for item in chunk
+                        if item.get("new_path_name")
+                    )
+                    folder_wait = max(30, total_folder_files * 2)
                     expected_paths = {
                         item["media_id"]: item["new_path_name"]
                         for item in chunk if item.get("new_path_name")
                     }
-                    logger.info(
-                        "Waiting for Radarr/Sonarr to confirm files found "
-                        "at new location (%d item(s), timeout %ds)…",
-                        len(actually_renamed), folder_wait,
-                    )
-                    app.wait_for_files_found(
-                        actually_renamed,
-                        expected_paths=expected_paths,
-                        max_wait=folder_wait,
-                    )
+                    # Only wait for items that had files on disk before the
+                    # rename — items with no files (e.g. upcoming/placeholder
+                    # entries) will never satisfy hasFile=True and would wait
+                    # the full timeout unnecessarily.
+                    has_file_ids = [
+                        item["media_id"] for item in chunk
+                        if item.get("new_path_name") and item.get("has_file")
+                    ]
+                    if has_file_ids:
+                        logger.info(
+                            "Waiting for Radarr/Sonarr to confirm files found "
+                            "at new location (%d file(s) across %d folder(s), timeout %ds)…",
+                            total_folder_files, len(has_file_ids), folder_wait,
+                        )
+                        app.wait_for_files_found(
+                            has_file_ids,
+                            expected_paths=expected_paths,
+                            max_wait=folder_wait,
+                        )
 
         # ── collect results ───────────────────────────────────────────────────
         total_files   = sum(len(i.get("file_info", {})) for i in chunk)
