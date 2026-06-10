@@ -26,9 +26,14 @@ instances:
     url: http://192.168.1.200:7878
     api_key: YOUR_API_KEY
 
-    # Number of items to process per run.
-    # Combined with enable_batching this controls how quickly you work through
-    # the library. Set to 0 to process everything in one run.
+    # Number of items to process per run (one chunk per scheduled run).
+    # Keep this at 50-75 for most setups — smaller chunks keep API timeouts
+    # proportional and avoid hammering Sonarr/Radarr with too many requests
+    # at once. When enable_batching: true is set, this value is the chunk
+    # size used across the full library run and must be set to a reasonable
+    # value (50-75 recommended). Do not set to 0 — processing an entire
+    # large library in one chunk will cause very long run times and
+    # unpredictable API timeouts.
     count: 5
 
     # Tag applied to every item after it has been processed. Items with this
@@ -49,10 +54,14 @@ instances:
     # a per-item preview is not available.
     rename_folders: true
 
-    # When false (default): processes `count` items per run, advancing through
-    # the library gradually across scheduled runs.
+    # When false (default): processes one chunk of `count` items per run,
+    # advancing through the library gradually across scheduled runs.
+    # Best for regular schedules (e.g. daily) where you want to spread work
+    # over time without long run times.
     # When true: processes the entire library in one run, using `count` as the
-    # chunk size. Set count to 0 to process everything in a single chunk.
+    # chunk size. Best for an initial bulk pass or infrequent scheduled runs.
+    # Always keep `count` at 50-75 in this mode — never set count to 0 when
+    # batching is enabled.
     enable_batching: false
 
     # When true, forces a metadata refresh from TVDB/TMDB for each item before
