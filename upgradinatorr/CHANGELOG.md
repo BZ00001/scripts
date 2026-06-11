@@ -5,6 +5,16 @@ The original module was written by [Drazzilb08](https://github.com/Drazzilb08/da
 
 ---
 
+## [1.3.2] - 2026-06-11
+
+### Added
+- Blank line separator between instance blocks in Discord notifications, preventing Radarr and Sonarr results from running together visually.
+
+### Fixed
+- Unattended mode triggering a full tag reset when items remained untagged but all failed the season threshold filter. The reset now only fires when every item in the library actually carries the checked tag.
+
+---
+
 ## [1.3.1] - 2026-06-09
 
 ### Fixed

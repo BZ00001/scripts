@@ -108,7 +108,7 @@ def check_for_update(logger) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 VALID_STATUSES = {"continuing", "airing", "ended", "canceled", "released"}
-VERSION            = "1.3.1"
+VERSION            = "1.3.2"
 GITHUB_RAW_URL     = "https://raw.githubusercontent.com/BZ00001/scripts/main/upgradinatorr/upgradinatorr.py"
 GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/upgradinatorr"
 
@@ -762,10 +762,15 @@ def send_discord_notification(
         name = f"{data['server_name']}  ({tagged}/{total} tagged)"
 
         fields.append({"name": name, "value": value, "inline": False})
+        fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
 
     if not fields:
         logger.debug("Discord: nothing to report, skipping notification.")
         return
+
+    # Remove trailing blank separator added after the last instance
+    if fields and fields[-1].get("name") == "\u200b":
+        fields.pop()
 
     if latest_version:
         fields.insert(0, {
