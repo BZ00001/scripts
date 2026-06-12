@@ -108,7 +108,7 @@ def check_for_update(logger) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 VALID_STATUSES = {"continuing", "airing", "ended", "canceled", "released"}
-VERSION            = "1.3.4"
+VERSION            = "1.4.0"
 GITHUB_RAW_URL     = "https://raw.githubusercontent.com/BZ00001/scripts/main/upgradinatorr/upgradinatorr.py"
 GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/upgradinatorr"
 
@@ -366,22 +366,6 @@ class ArrClient:
         }
         return self._post("command", body)
 
-    def wait_for_command(self, command_id: int, timeout: int = 120) -> bool:
-        """Poll until the command completes or timeout (seconds) is reached."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                cmd = self._get(f"command/{command_id}")
-                state = cmd.get("state", "")
-                if state == "completed":
-                    return True
-                if state in ("failed", "aborted"):
-                    return False
-            except Exception:
-                pass
-            time.sleep(3)
-        return False
-
     # ── history ───────────────────────────────────────────────────────────────
 
     def get_history_grabs(
@@ -423,16 +407,6 @@ class ArrClient:
                 "quality": quality,
             })
         return result
-
-    # ── queue ─────────────────────────────────────────────────────────────────
-
-    def get_queue(self) -> Dict:
-        params = {
-            "pageSize": 1000,
-            "includeUnknownMovieItems": "false",
-            "includeUnknownSeriesItems": "false",
-        }
-        return self._get("queue", params=params)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -507,29 +481,47 @@ def filter_media(
     return filtered
 
 
-def process_queue(
-    queue: Dict, instance_type: str, media_ids: List[int]
-) -> List[Dict]:
-    id_key = "movieId" if instance_type == "radarr" else "seriesId"
-    seen = set()
-    result = []
-    for record in queue.get("records", []):
-        mid = record.get(id_key)
-        if mid not in media_ids or "downloadId" not in record:
+def has_threshold_blocked_items(
+    media_list: List[Dict],
+    checked_tag_id: int,
+    ignore_tag_id: Optional[int],
+    season_monitored_threshold: float,
+) -> bool:
+    """
+    Return True if any untagged Sonarr item passes the basic eligibility
+    checks (monitored, valid status, not ignored) but is excluded solely
+    because no season currently meets the monitored threshold.
+
+    These items could become eligible later as more episodes are monitored,
+    so an unattended reset should be deferred while they exist - resetting
+    would not help them and could cause premature/early cycle restarts.
+    """
+    for item in media_list:
+        if checked_tag_id in item["tags"]:
             continue
-        key = (record["downloadId"], mid)
-        if key in seen:
+        if ignore_tag_id and ignore_tag_id in item["tags"]:
             continue
-        seen.add(key)
-        result.append(
-            {
-                "download_id": record["downloadId"],
-                "media_id": mid,
-                "download": record.get("title"),
-                "custom_format_score": record.get("customFormatScore"),
-            }
-        )
-    return result
+        if not item["monitored"]:
+            continue
+        if item["status"] not in VALID_STATUSES:
+            continue
+        if item["is_radarr"]:
+            continue
+
+        any_monitored_season = False
+        for season in item.get("seasons") or []:
+            eps = season["episode_data"]
+            if not eps:
+                continue
+            monitored_pct = (sum(1 for e in eps if e["monitored"]) / len(eps)) * 100
+            if monitored_pct >= season_monitored_threshold and season["monitored"]:
+                any_monitored_season = True
+                break
+
+        if not any_monitored_season:
+            return True
+
+    return False
 
 
 def process_instance(
@@ -560,12 +552,22 @@ def process_instance(
     )
 
     # Unattended: if nothing left to search, wipe tags and start fresh.
-    # Check that every item is actually tagged before resetting - an empty
-    # filter result can also mean all remaining untagged items fail the season
-    # threshold, in which case a reset would skip them permanently.
-    all_tagged = all(checked_tag_id in item["tags"] for item in media_list)
-    if not filtered and unattended and all_tagged:
-        logger.info("All media tagged – clearing tags for unattended cycle.")
+    #
+    # An empty `filtered` result can mean two different things:
+    #  1. Every item has been tagged this cycle -> safe to reset.
+    #  2. Some untagged items remain but are permanently/long-term ineligible
+    #     (unmonitored, wrong status like 'announced', ignore tag) -> also
+    #     safe to reset, since these items will be skipped again regardless
+    #     and would otherwise block the cycle from ever restarting.
+    #  3. Some untagged Sonarr items remain that are excluded *only* because
+    #     no season currently meets the season_monitored_threshold -> NOT
+    #     safe to reset, since these items could become eligible later as
+    #     episodes are monitored, and a reset wouldn't change that.
+    threshold_blocked = has_threshold_blocked_items(
+        media_list, checked_tag_id, ignore_tag_id, season_threshold
+    )
+    if not filtered and unattended and not threshold_blocked:
+        logger.info("Nothing left to search – clearing tags for unattended cycle.")
         all_ids = [m["media_id"] for m in media_list]
         if not dry_run:
             app.remove_tag_from_all(all_ids, checked_tag_id)
@@ -590,7 +592,6 @@ def process_instance(
     searched_ids: List[int] = []
 
     if not dry_run:
-        search_count = 0
         pending_commands: List[Dict] = []   # {command_id, media_id, title, year}
         search_start = datetime.datetime.utcnow()
 
@@ -609,7 +610,6 @@ def process_instance(
                         {"command_id": resp["id"], "media_id": mid,
                          "title": item["title"], "year": item["year"]}
                     )
-                search_count += 1
                 searched_ids.append(mid)
             else:
                 # Sonarr – one command per monitored season
@@ -625,7 +625,6 @@ def process_instance(
                             )
                         searched = True
                 if searched:
-                    search_count += 1
                     searched_ids.append(mid)
 
         # ── Phase 2: optionally wait for commands (single-threaded poll) ──────

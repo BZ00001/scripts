@@ -5,6 +5,17 @@ The original module was written by [Drazzilb08](https://github.com/Drazzilb08/da
 
 ---
 
+## [1.4.0] - 2026-06-12
+
+### Changed
+- **Unattended reset condition refined.** Previously the reset only fired when *every* item in the library was tagged, which meant items permanently or long-term ineligible (unmonitored, status `announced`/`inCinemas`, ignore tag) could block the cycle from ever restarting - in one case Radarr got stuck at 33/48 indefinitely because the remaining 15 movies were not yet released. The reset now fires whenever nothing is left to search, *unless* some untagged Sonarr items are excluded only by the season monitored threshold (which could still become eligible later). New `has_threshold_blocked_items()` helper implements this check.
+
+### Removed
+- Dead code from the old queue-based grab-checking approach, fully superseded by `get_history_grabs()`: `ArrClient.wait_for_command()`, `ArrClient.get_queue()`, and the module-level `process_queue()` function.
+- Unused `search_count` counter in `process_instance` (incremented but never read).
+
+---
+
 ## [1.3.4] - 2026-06-12
 
 ### Added
