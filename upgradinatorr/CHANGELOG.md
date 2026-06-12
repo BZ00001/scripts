@@ -5,6 +5,26 @@ The original module was written by [Drazzilb08](https://github.com/Drazzilb08/da
 
 ---
 
+## [1.3.4] - 2026-06-12
+
+### Added
+- Discord notifications now show a "Nothing to process" field for an instance when all remaining untagged items are unmonitored, not yet available (announced/in cinemas/upcoming), or fail the season monitored threshold. Previously this case produced no field at all, making it look like the instance was skipped or broken.
+
+### Changed
+- Instance separator in Discord notifications changed from a blank line (`\u2800`) to a thin divider (`▬▬▬▬▬...`), reducing the large empty gap between instance blocks.
+
+### Fixed
+- `process_instance` returning `None` when there was nothing to process, instead of the populated output dict. This caused the instance to be silently dropped from the Discord notification entirely, even though the terminal log showed it correctly.
+
+---
+
+## [1.3.3] - 2026-06-11
+
+### Fixed
+- Instance separator field in Discord notifications not rendering on some clients (e.g. macOS). `\u200b` (zero-width space) is collapsed by certain Discord clients since it has no visible glyph. Replaced with `\u2800` (Braille Pattern Blank), which renders consistently across all clients.
+
+---
+
 ## [1.3.2] - 2026-06-11
 
 ### Added

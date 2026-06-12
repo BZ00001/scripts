@@ -108,7 +108,7 @@ def check_for_update(logger) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 VALID_STATUSES = {"continuing", "airing", "ended", "canceled", "released"}
-VERSION            = "1.3.2"
+VERSION            = "1.3.4"
 GITHUB_RAW_URL     = "https://raw.githubusercontent.com/BZ00001/scripts/main/upgradinatorr/upgradinatorr.py"
 GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/upgradinatorr"
 
@@ -574,10 +574,6 @@ def process_instance(
             media_list, checked_tag_id, ignore_tag_id, count, season_threshold, logger,
         )
 
-    if not filtered:
-        logger.info("Nothing to process for %s.", app.name)
-        return None
-
     tagged_count = sum(1 for m in media_list if checked_tag_id in m["tags"])
     output = {
         "server_name": app.name,
@@ -586,6 +582,10 @@ def process_instance(
         "total_count": len(media_list),
         "data": [],
     }
+
+    if not filtered:
+        logger.info("Nothing to process for %s.", app.name)
+        return output
 
     searched_ids: List[int] = []
 
@@ -734,7 +734,25 @@ def send_discord_notification(
     fields = []
 
     for instance_name, data in results.items():
-        if not data or not data.get("data"):
+        if not data:
+            continue
+
+        tagged = data.get("tagged_count", 0)
+        total = data.get("total_count", 0)
+        name = f"{data['server_name']}  ({tagged}/{total} tagged)"
+
+        if not data.get("data"):
+            fields.append({
+                "name": name,
+                "value": (
+                    "*Nothing to process.* All remaining untagged items are "
+                    "either unmonitored, not yet available (announced/in "
+                    "cinemas/upcoming), or don't meet the season monitored "
+                    "threshold."
+                ),
+                "inline": False,
+            })
+            fields.append({"name": "\u2800", "value": "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬", "inline": False})
             continue
 
         lines = []
@@ -757,19 +775,15 @@ def send_discord_notification(
         if len(value) > 1024:
             value = value[:1020] + "\n…"
 
-        tagged = data.get("tagged_count", 0)
-        total = data.get("total_count", 0)
-        name = f"{data['server_name']}  ({tagged}/{total} tagged)"
-
         fields.append({"name": name, "value": value, "inline": False})
-        fields.append({"name": "\u200b", "value": "\u200b", "inline": False})
+        fields.append({"name": "\u2800", "value": "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬", "inline": False})
 
     if not fields:
         logger.debug("Discord: nothing to report, skipping notification.")
         return
 
     # Remove trailing blank separator added after the last instance
-    if fields and fields[-1].get("name") == "\u200b":
+    if fields and fields[-1].get("name") == "\u2800":
         fields.pop()
 
     if latest_version:
