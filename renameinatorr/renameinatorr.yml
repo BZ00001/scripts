@@ -10,8 +10,14 @@ dry_run: false
 # Log verbosity: DEBUG | INFO | WARNING | ERROR
 log_level: INFO
 
+# Optional log file with rotation (5 MB per file, 3 backups kept).
+# Useful for infrequent schedules where the terminal log is long gone by
+# the time you check. Leave commented out to log to stdout only.
+# log_file: /mnt/user/appdata/scripts/natorr/renameinatorr.log
+
 # Discord webhook URL for rename notifications (optional).
-# A message is only sent when something was actually renamed.
+# A notification is sent after every run, including a summary when nothing
+# needed renaming and error fields for any instances that failed.
 # Leave commented out or empty to disable.
 # discord_webhook: https://discord.com/api/webhooks/YOUR_WEBHOOK_URL
 
