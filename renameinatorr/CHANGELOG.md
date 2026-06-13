@@ -3,6 +3,42 @@
 All notable changes to this project will be documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [1.6.0] – 2026-06-13
+
+### Added
+- `--version` CLI flag — prints the version number and exits, without
+  triggering a run. Useful for support requests.
+- `log_file` global yml setting (optional) — logs to a rotating file
+  (5 MB per file, 3 backups kept) in addition to stdout. Useful for
+  infrequent schedules where the terminal log is long gone by the time
+  you check.
+- Retry with backoff on transient API failures — `_get`/`_post`/`_put` now
+  retry up to 3 times with exponential backoff (2s, 4s) on connection errors
+  and timeouts. One mid-run network blip no longer aborts an entire instance
+  run. HTTP error responses (4xx/5xx) are not retried since those indicate a
+  request problem rather than a network issue.
+- Failed instances now appear in the Discord notification as a clear
+  `⚠️ Run failed` field with the error reason, instead of silently
+  disappearing from the results. The notification also fires when all
+  instances failed, so silence no longer means success.
+- Run summary footer — every run ends with a one-line summary:
+  instances processed, files renamed, folders renamed, failures, and
+  total runtime. Makes scanning scheduled run logs much faster.
+- `count` validation at startup — `count: 0` with `enable_batching: true`
+  now clamps the chunk size to 100 with a warning telling the user to set
+  50-75 in the yml. `count: 0` without batching on a library larger than
+  100 items warns that the whole library will be processed in one chunk.
+
+### Fixed
+- GitHub version check silently broken — the check looked for lines starting
+  with `VERSION = "` but the constant is alignment-padded
+  (`VERSION           = "`), so the check would never match once pushed.
+  Now uses a whitespace-tolerant regex.
+- Outdated Discord webhook comment in the yml — claimed notifications were
+  only sent when something was renamed, which has not been true since 1.1.0.
+
+---
+
 ## [1.5.2] – 2026-06-09
 
 ### Added

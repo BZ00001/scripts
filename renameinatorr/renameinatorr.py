@@ -74,7 +74,7 @@ SEASON_REGEX = re.compile(r"^Season \d+/", re.IGNORECASE)
 
 DEFAULT_BATCH_SIZE = 100
 
-VERSION           = "1.5.2"
+VERSION           = "1.6.0"
 GITHUB_RAW_URL    = "https://raw.githubusercontent.com/BZ00001/scripts/main/renameinatorr/renameinatorr.py"
 GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/renameinatorr"
 
@@ -100,12 +100,12 @@ def check_for_update(logger: logging.Logger) -> Optional[str]:
     try:
         resp = requests.get(GITHUB_RAW_URL, timeout=10)
         resp.raise_for_status()
-        for line in resp.text.splitlines():
-            if line.startswith('VERSION = "') or line.startswith("VERSION = '"):
-                latest = line.split('"')[1] if '"' in line else line.split("'")[1]
-                if _parse_version(latest) > _parse_version(VERSION):
-                    return latest
-                return None
+        # Match VERSION = "x.y.z" regardless of alignment whitespace.
+        m = re.search(r'^VERSION\s*=\s*["\']([\d.]+)["\']', resp.text, re.MULTILINE)
+        if m:
+            latest = m.group(1)
+            if _parse_version(latest) > _parse_version(VERSION):
+                return latest
     except Exception as exc:
         logger.debug("Version check failed: %s", exc)
     return None
@@ -116,13 +116,38 @@ def check_for_update(logger: logging.Logger) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def setup_logging(level: str) -> logging.Logger:
+def setup_logging(level: str, log_file: Optional[str] = None) -> logging.Logger:
+    """
+    Configure logging to stdout and optionally to a rotating log file.
+
+    *log_file* enables a RotatingFileHandler (5 MB per file, 3 backups) so
+    users on infrequent schedules keep history beyond the last terminal run.
+    """
     numeric = getattr(logging, level.upper(), logging.INFO)
-    logging.basicConfig(
-        format="%(asctime)s  %(levelname)-8s  %(message)s",
+    fmt     = logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-        level=numeric,
     )
+
+    root = logging.getLogger()
+    root.setLevel(numeric)
+    root.handlers.clear()
+
+    stream = logging.StreamHandler(sys.stdout)
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
+
+    if log_file:
+        try:
+            from logging.handlers import RotatingFileHandler
+            file_handler = RotatingFileHandler(
+                log_file, maxBytes=5 * 1024 * 1024, backupCount=3
+            )
+            file_handler.setFormatter(fmt)
+            root.addHandler(file_handler)
+        except Exception as exc:
+            root.warning("Could not open log file %s: %s", log_file, exc)
+
     return logging.getLogger("renameinatorr")
 
 
@@ -150,20 +175,42 @@ class ArrClient:
     def _url(self, path: str) -> str:
         return f"{self.base}/api/v3/{path.lstrip('/')}"
 
+    def _request_with_retry(self, method: str, path: str, **kwargs) -> Any:
+        """
+        Issue an HTTP request, retrying up to 3 times with exponential
+        backoff on transient failures (connection errors and timeouts).
+
+        HTTP error responses (4xx/5xx) are not retried — those indicate a
+        request problem, not a network blip. One mid-run hiccup should not
+        abort an entire instance run.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, 4):
+            try:
+                r = self._session.request(method, self._url(path), timeout=60, **kwargs)
+                r.raise_for_status()
+                return r.json()
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as exc:
+                last_exc = exc
+                if attempt < 3:
+                    wait = 2 ** attempt  # 2s, 4s
+                    self._logger.warning(
+                        "Transient %s error on %s (attempt %d/3), "
+                        "retrying in %ds: %s",
+                        method, path, attempt, wait, exc,
+                    )
+                    time.sleep(wait)
+        raise last_exc  # type: ignore[misc]
+
     def _get(self, path: str, params: Optional[Dict] = None) -> Any:
-        r = self._session.get(self._url(path), params=params, timeout=60)
-        r.raise_for_status()
-        return r.json()
+        return self._request_with_retry("GET", path, params=params)
 
     def _post(self, path: str, body: Dict) -> Any:
-        r = self._session.post(self._url(path), json=body, timeout=60)
-        r.raise_for_status()
-        return r.json()
+        return self._request_with_retry("POST", path, json=body)
 
     def _put(self, path: str, body: Dict) -> Any:
-        r = self._session.put(self._url(path), json=body, timeout=60)
-        r.raise_for_status()
-        return r.json()
+        return self._request_with_retry("PUT", path, json=body)
 
     # ── connection ────────────────────────────────────────────────────────────
 
@@ -595,10 +642,25 @@ def process_instance(
 
     # ── build chunks to process ───────────────────────────────────────────────
     if enable_batching:
+        if not count:
+            # count: 0 with batching would mean one giant chunk. Clamp to the
+            # default chunk size and warn so the user fixes their config.
+            logger.warning(
+                "count: 0 with enable_batching: true is not supported — "
+                "clamping chunk size to %d. Set count to 50-75 in the yml.",
+                DEFAULT_BATCH_SIZE,
+            )
         chunk_size = count if count else DEFAULT_BATCH_SIZE
         chunks     = get_chunks(media_list, chunk_size)
         logger.info("Batching enabled: %d chunk(s) of up to %d items.", len(chunks), chunk_size)
     else:
+        if not count and len(media_list) > DEFAULT_BATCH_SIZE:
+            logger.warning(
+                "count: 0 with %d items — the whole library will be processed "
+                "in one chunk. For large libraries set count to 50-75 to keep "
+                "timeouts proportional and API load manageable.",
+                len(media_list),
+            )
         chunks = get_chunks(media_list, count)[:1] if count else [media_list]
 
     final_results: List[Dict] = []
@@ -854,6 +916,7 @@ def send_discord_notification(
     dry_run: bool,
     logger: logging.Logger,
     latest_version: Optional[str] = None,
+    failed_instances: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Post a rename summary embed to a Discord webhook.
@@ -926,6 +989,17 @@ def send_discord_notification(
                 value = value[:1020] + "\n…"
             fields.append({"name": f"{header}  ·  📁 Folders", "value": value, "inline": False})
 
+    # Failed instances get a clear error field so users notice at a glance
+    # rather than wondering why an instance is missing from the notification.
+    if failed_instances:
+        for inst_name, reason in failed_instances.items():
+            reason_short = reason if len(reason) <= 200 else reason[:197] + "…"
+            fields.append({
+                "name":   f"⚠️ {inst_name}",
+                "value":  f"Run failed: {reason_short}",
+                "inline": False,
+            })
+
     if not fields:
         logger.debug("Discord: nothing to report, skipping notification.")
         return
@@ -980,6 +1054,12 @@ def main() -> None:
         description="renameinatorr – standalone Radarr/Sonarr file & folder renamer"
     )
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"renameinatorr v{VERSION}",
+        help="Show version number and exit",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=Path(__file__).with_name("renameinatorr.yml"),
@@ -1002,9 +1082,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    run_start = time.time()
     config    = load_config(args.config)
     log_level = "DEBUG" if args.debug else config.get("log_level", "INFO")
-    logger    = setup_logging(log_level)
+    logger    = setup_logging(log_level, log_file=config.get("log_file"))
 
     dry_run: bool = args.dry_run or config.get("dry_run", False)
 
@@ -1030,6 +1111,7 @@ def main() -> None:
         sys.exit(1)
 
     all_results: Dict[str, Dict[str, Any]] = {}
+    failed_instances: Dict[str, str] = {}
 
     for inst in instances:
         name      = inst.get("name", "Unknown")
@@ -1046,13 +1128,15 @@ def main() -> None:
 
         app = ArrClient(url, api_key, inst_type, name)
         if not app.ping():
+            failed_instances[name] = "connection failed"
             continue
 
         try:
             data = process_instance(app, inst, dry_run, logger, title_filter=args.title)
             all_results[name] = {"server_name": name, "data": data}
-        except Exception:
+        except Exception as exc:
             logger.exception("Error processing instance %s", name)
+            failed_instances[name] = f"{type(exc).__name__}: {exc}"
 
     if all_results:
         print_output(all_results, logger)
@@ -1060,8 +1144,28 @@ def main() -> None:
         logger.info("No results to display.")
 
     webhook_url = config.get("discord_webhook")
-    if webhook_url and all_results:
-        send_discord_notification(webhook_url, all_results, dry_run, logger, latest_version)
+    if webhook_url and (all_results or failed_instances):
+        send_discord_notification(
+            webhook_url, all_results, dry_run, logger,
+            latest_version, failed_instances,
+        )
+
+    # ── run summary footer ────────────────────────────────────────────────────
+    total_files = sum(
+        sum(len(i.get("file_info", {})) for i in d.get("data", []))
+        for d in all_results.values()
+    )
+    total_folders = sum(
+        sum(1 for i in d.get("data", []) if i.get("new_path_name"))
+        for d in all_results.values()
+    )
+    elapsed = time.time() - run_start
+    logger.info(
+        "Done: %d instance(s) | %d file(s) renamed | %d folder(s) renamed "
+        "| %d failure(s) | %.1fs",
+        len(all_results), total_files, total_folders,
+        len(failed_instances), elapsed,
+    )
 
 
 if __name__ == "__main__":

@@ -5,6 +5,31 @@ The original module was written by [Drazzilb08](https://github.com/Drazzilb08/da
 
 ---
 
+## [1.6.0] - 2026-06-13
+
+### Added
+- **`reset_when_blocked` setting** (per instance, default `true`). Controls unattended reset behavior when nothing is left to search. With the default `true`, the cycle always clears all tags and restarts, so it never stalls - matching how Radarr already behaved. Set to `false` to defer the reset while untagged Sonarr seasons remain below the monitored threshold (useful if you want those to be picked up later rather than restarting the cycle).
+
+### Changed
+- The 1.4.0 threshold-blocked deferral is now opt-in via `reset_when_blocked: false` rather than always-on. By default the cycle resets whenever nothing is left to search, which is the expected behavior for most setups and prevents Sonarr from appearing stuck at a partial tag count.
+
+---
+
+## [1.5.0] - 2026-06-12
+
+### Added
+- **Centralized retry on all API calls.** Every Radarr/Sonarr request now goes through a single `_request` helper that retries up to 3 times with exponential back-off (1s, 2s, 4s). Previously only `fetch_episode_data` retried; `search_media`, `search_season`, `add_tag`, tag removal, and command polling had no retry and could silently fail mid-run.
+- **`--instance NAME` CLI flag** (repeatable) to process only the named instance(s), useful for testing or targeted runs.
+- **Discord 25-field limit guard.** Notifications with many instances could exceed Discord's hard cap of 25 embed fields and fail to send. Output is now trimmed with a truncation notice when needed.
+
+### Changed
+- **Thread-safe HTTP via per-thread sessions.** `ArrClient.session` is now a thread-local property, so a single client instance is safe to use across the thread pools (episode fetching, tag removal) without sharing a `requests.Session` between threads. `fetch_episode_data` no longer creates a throwaway session per call, restoring connection pooling.
+- **Timezone-aware datetimes.** Replaced deprecated `datetime.utcnow()` (removed in future Python versions) with `datetime.now(timezone.utc)`. History grab timestamps are compared timezone-aware.
+- **Per-field config validation messages.** Missing `url` and missing `api_key` now produce separate, clearer skip warnings instead of a single combined message.
+- **Discord notification refactor.** The per-instance embed field assembly is extracted into a `build_instance_fields()` helper, with shared `DIVIDER` and `NOTHING_TO_PROCESS` constants, making the notification code easier to follow and maintain.
+
+---
+
 ## [1.4.0] - 2026-06-12
 
 ### Changed

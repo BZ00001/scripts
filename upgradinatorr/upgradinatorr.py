@@ -65,6 +65,7 @@ import argparse
 import datetime
 import logging
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -108,7 +109,7 @@ def check_for_update(logger) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 VALID_STATUSES = {"continuing", "airing", "ended", "canceled", "released"}
-VERSION            = "1.4.0"
+VERSION            = "1.6.0"
 GITHUB_RAW_URL     = "https://raw.githubusercontent.com/BZ00001/scripts/main/upgradinatorr/upgradinatorr.py"
 GITHUB_RELEASE_URL = "https://github.com/BZ00001/scripts/tree/main/upgradinatorr"
 
@@ -170,33 +171,55 @@ class BufferingLogger:
 class ArrClient:
     """Minimal Radarr / Sonarr API client."""
 
+    MAX_RETRIES = 3
+
     def __init__(self, url: str, api_key: str, instance_type: str, name: str) -> None:
         self.base = url.rstrip("/")
         self.api_key = api_key
         self.instance_type = instance_type.lower()   # "radarr" or "sonarr"
         self.name = name
-        self.session = requests.Session()
-        self.session.headers.update({"X-Api-Key": api_key, "Content-Type": "application/json"})
+        self._local = threading.local()
 
     # ── internal helpers ──────────────────────────────────────────────────────
+
+    @property
+    def session(self) -> requests.Session:
+        """A per-thread session so the client is safe to use from thread pools."""
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = requests.Session()
+            s.headers.update({"X-Api-Key": self.api_key, "Content-Type": "application/json"})
+            self._local.session = s
+        return s
 
     def _url(self, path: str) -> str:
         return f"{self.base}/api/v3/{path.lstrip('/')}"
 
+    def _request(self, method: str, path: str, **kwargs) -> Any:
+        """Issue an HTTP request with retry and exponential back-off."""
+        kwargs.setdefault("timeout", 30)
+        last_exc: Exception = RuntimeError("no attempts made")
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                r = self.session.request(method, self._url(path), **kwargs)
+                r.raise_for_status()
+                if r.content:
+                    return r.json()
+                return None
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.MAX_RETRIES - 1:
+                    time.sleep(2 ** attempt)  # 1s, 2s, 4s
+        raise last_exc
+
     def _get(self, path: str, params: Optional[Dict] = None) -> Any:
-        r = self.session.get(self._url(path), params=params, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        return self._request("GET", path, params=params)
 
     def _post(self, path: str, body: Dict) -> Any:
-        r = self.session.post(self._url(path), json=body, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        return self._request("POST", path, json=body)
 
     def _put(self, path: str, body: Dict) -> Any:
-        r = self.session.put(self._url(path), json=body, timeout=30)
-        r.raise_for_status()
-        return r.json()
+        return self._request("PUT", path, json=body)
 
     # ── connection check ──────────────────────────────────────────────────────
 
@@ -304,27 +327,12 @@ class ArrClient:
             return result
 
     def fetch_episode_data(self, series_id: int, seasons_raw: List[Dict]) -> List[Dict]:
-        """Fetch episode list for one series.
+        """Fetch episode list for one series and structure it by season.
 
-        Uses its own session so it is safe to call from multiple threads.
-        Retries up to 3 times with a short back-off on transient failures.
+        Safe to call from multiple threads (per-thread session) and retries
+        on transient failures via the shared _get helper.
         """
-        url = f"{self.base}/api/v3/episode"
-        headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
-        last_exc: Exception = RuntimeError("no attempts made")
-        for attempt in range(3):
-            try:
-                session = requests.Session()
-                session.headers.update(headers)
-                r = session.get(url, params={"seriesId": series_id}, timeout=30)
-                r.raise_for_status()
-                episodes = r.json()
-                break
-            except Exception as exc:
-                last_exc = exc
-                time.sleep(2 ** attempt)  # 1s, 2s, 4s
-        else:
-            raise last_exc
+        episodes = self._get("episode", params={"seriesId": series_id})
 
         episodes_by_season: Dict[int, List[Dict]] = {}
         for ep in episodes:
@@ -371,7 +379,7 @@ class ArrClient:
     def get_history_grabs(
         self, media_id: int, since: datetime.datetime
     ) -> List[Dict]:
-        """Return releases grabbed for this item since *since* (UTC naive)."""
+        """Return releases grabbed for this item since *since* (timezone-aware UTC)."""
         id_key = "movieId" if self.instance_type == "radarr" else "seriesId"
         # Don't filter by eventType in the API call — Radarr/Sonarr versions
         # differ on whether they accept a string or numeric value. Filter in code.
@@ -390,10 +398,11 @@ class ArrClient:
             date_str = r.get("date", "")
             try:
                 dt = datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                dt_naive = dt.replace(tzinfo=None)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
             except Exception:
                 continue
-            if dt_naive < since:
+            if dt < since:
                 continue
             quality = (
                 r.get("quality", {}).get("quality", {}).get("name") or "?"
@@ -539,6 +548,7 @@ def process_instance(
     command_timeout: int = settings.get("command_timeout", 60)
     history_check_delay: int = settings.get("history_check_delay", 15)
     history_check_delay_per_item: int = settings.get("history_check_delay_per_item", 10)
+    reset_when_blocked: bool = settings.get("reset_when_blocked", True)
 
     logger.info("── %s (%s) ──────────────────────────────────", app.name, app.instance_type)
 
@@ -553,20 +563,26 @@ def process_instance(
 
     # Unattended: if nothing left to search, wipe tags and start fresh.
     #
-    # An empty `filtered` result can mean two different things:
+    # An empty `filtered` result can mean different things:
     #  1. Every item has been tagged this cycle -> safe to reset.
     #  2. Some untagged items remain but are permanently/long-term ineligible
     #     (unmonitored, wrong status like 'announced', ignore tag) -> also
     #     safe to reset, since these items will be skipped again regardless
     #     and would otherwise block the cycle from ever restarting.
     #  3. Some untagged Sonarr items remain that are excluded *only* because
-    #     no season currently meets the season_monitored_threshold -> NOT
-    #     safe to reset, since these items could become eligible later as
-    #     episodes are monitored, and a reset wouldn't change that.
-    threshold_blocked = has_threshold_blocked_items(
-        media_list, checked_tag_id, ignore_tag_id, season_threshold
+    #     no season currently meets the season_monitored_threshold.
+    #
+    # By default (reset_when_blocked: true) the cycle resets in all three
+    # cases so it never stalls. Set reset_when_blocked: false to defer the
+    # reset while case 3 items exist (they may become eligible later as more
+    # episodes are monitored).
+    blocking = (
+        not reset_when_blocked
+        and has_threshold_blocked_items(
+            media_list, checked_tag_id, ignore_tag_id, season_threshold
+        )
     )
-    if not filtered and unattended and not threshold_blocked:
+    if not filtered and unattended and not blocking:
         logger.info("Nothing left to search – clearing tags for unattended cycle.")
         all_ids = [m["media_id"] for m in media_list]
         if not dry_run:
@@ -593,7 +609,7 @@ def process_instance(
 
     if not dry_run:
         pending_commands: List[Dict] = []   # {command_id, media_id, title, year}
-        search_start = datetime.datetime.utcnow()
+        search_start = datetime.datetime.now(datetime.timezone.utc)
 
         # ── Phase 1: fire all search commands ─────────────────────────────────
         for item in filtered:
@@ -715,45 +731,28 @@ def print_output(results: Dict[str, Optional[Dict]], logger: logging.Logger) -> 
 # ─────────────────────────────────────────────────────────────────────────────
 
 EMBED_COLOR = 0x4F91C7   # Radarr blue-ish
+DIVIDER = "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
+NOTHING_TO_PROCESS = (
+    "*Nothing to process.* All remaining untagged items are either "
+    "unmonitored, not yet available (announced/in cinemas/upcoming), "
+    "or don't meet the season monitored threshold."
+)
 
-def send_discord_notification(
-    webhook_url: str,
-    results: Dict[str, Optional[Dict]],
-    dry_run: bool,
-    logger: logging.Logger,
-    latest_version: Optional[str] = None,
-) -> None:
+
+def build_instance_fields(data: Dict) -> List[Dict]:
+    """Build the Discord embed field for a single instance result.
+
+    Returns a single-field list. The divider is appended to the field value
+    so it renders directly under the content with no blank line on either side;
+    the caller strips the divider from the final field.
     """
-    Post a summary embed to a Discord webhook.
+    tagged = data.get("tagged_count", 0)
+    total = data.get("total_count", 0)
+    name = f"{data['server_name']}  ({tagged}/{total} tagged)"
 
-    One embed field per instance. Only instances that actually searched
-    something are included. Skips the notification entirely if nothing
-    was searched across all instances.
-    """
-    fields = []
-
-    for instance_name, data in results.items():
-        if not data:
-            continue
-
-        tagged = data.get("tagged_count", 0)
-        total = data.get("total_count", 0)
-        name = f"{data['server_name']}  ({tagged}/{total} tagged)"
-
-        if not data.get("data"):
-            fields.append({
-                "name": name,
-                "value": (
-                    "*Nothing to process.* All remaining untagged items are "
-                    "either unmonitored, not yet available (announced/in "
-                    "cinemas/upcoming), or don't meet the season monitored "
-                    "threshold."
-                ),
-                "inline": False,
-            })
-            fields.append({"name": "\u2800", "value": "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬", "inline": False})
-            continue
-
+    if not data.get("data"):
+        value = NOTHING_TO_PROCESS
+    else:
         lines = []
         for item in data["data"]:
             line = f"**{item['title']}** ({item['year']})"
@@ -767,23 +766,48 @@ def send_discord_notification(
             else:
                 line += "\n　↳ *Nothing grabbed (no upgrade found)*"
             lines.append(line)
-
         value = "\n\n".join(lines)
 
-        # Discord field value limit is 1024 chars – truncate gracefully
-        if len(value) > 1024:
-            value = value[:1020] + "\n…"
+    # Append divider so it sits directly under the content. Reserve room
+    # for it within the 1024-char field limit.
+    divider_suffix = f"\n{DIVIDER}"
+    max_content = 1024 - len(divider_suffix)
+    if len(value) > max_content:
+        value = value[:max_content - 2] + "\n…"
+    value += divider_suffix
 
-        fields.append({"name": name, "value": value, "inline": False})
-        fields.append({"name": "\u2800", "value": "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬", "inline": False})
+    return [{"name": name, "value": value, "inline": False}]
+
+
+def send_discord_notification(
+    webhook_url: str,
+    results: Dict[str, Optional[Dict]],
+    dry_run: bool,
+    logger: logging.Logger,
+    latest_version: Optional[str] = None,
+) -> None:
+    """
+    Post a summary embed to a Discord webhook.
+
+    One embed field per instance. Skips the notification entirely if there
+    is nothing to report across all instances.
+    """
+    fields: List[Dict] = []
+
+    for instance_name, data in results.items():
+        if not data:
+            continue
+        fields.extend(build_instance_fields(data))
 
     if not fields:
         logger.debug("Discord: nothing to report, skipping notification.")
         return
 
-    # Remove trailing blank separator added after the last instance
-    if fields and fields[-1].get("name") == "\u2800":
-        fields.pop()
+    # Remove trailing divider from the last instance field
+    if fields:
+        last = fields[-1]
+        if last.get("value", "").endswith(f"\n{DIVIDER}"):
+            last["value"] = last["value"][: -len(f"\n{DIVIDER}")]
 
     if latest_version:
         fields.insert(0, {
@@ -796,12 +820,22 @@ def send_discord_notification(
     if dry_run:
         title += "  `[DRY RUN]`"
 
+    # Discord allows at most 25 fields per embed. If we exceed that (many
+    # instances, dividers, update notice), trim and append a notice.
+    if len(fields) > 25:
+        fields = fields[:24]
+        fields.append({
+            "name": "\u2800",
+            "value": "*Output truncated - too many fields for one Discord message.*",
+            "inline": False,
+        })
+
     embed = {
         "title": title,
         "color": EMBED_COLOR,
         "fields": fields,
         "footer": {"text": f"upgradinatorr v{VERSION}"},
-        "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
     payload = {"embeds": [embed]}
@@ -841,6 +875,12 @@ def main() -> None:
     )
     parser.add_argument("--dry-run", action="store_true", help="Log actions without making any changes")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--instance",
+        action="append",
+        metavar="NAME",
+        help="Only process the named instance (repeatable). Matches the 'name' field, case-insensitive.",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -868,6 +908,14 @@ def main() -> None:
         logger.error("No instances defined in config. Exiting.")
         sys.exit(1)
 
+    # Optional --instance filter
+    only = {n.lower() for n in args.instance} if args.instance else None
+    if only:
+        instances = [i for i in instances if i.get("name", "").lower() in only]
+        if not instances:
+            logger.error("No configured instances match --instance %s. Exiting.", ", ".join(sorted(only)))
+            sys.exit(1)
+
     # Build the list of valid, reachable instances first
     clients: List[tuple] = []
     for inst in instances:
@@ -879,8 +927,11 @@ def main() -> None:
         if inst_type not in ("radarr", "sonarr"):
             logger.warning("Instance %s: unknown type %r – skipping.", name, inst_type)
             continue
-        if not url or not api_key:
-            logger.warning("Instance %s: missing url or api_key – skipping.", name)
+        if not url:
+            logger.warning("Instance %s: missing url – skipping.", name)
+            continue
+        if not api_key:
+            logger.warning("Instance %s: missing api_key – skipping.", name)
             continue
 
         app = ArrClient(url, api_key, inst_type, name)

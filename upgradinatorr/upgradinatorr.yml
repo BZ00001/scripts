@@ -9,7 +9,7 @@ log_level: INFO         # DEBUG | INFO | WARNING | ERROR
 # Discord webhook URL for run notifications (optional).
 # Only sends a message when items were actually searched.
 # Leave commented out or empty to disable.
-# discord_webhook: https://discord.com/api/webhooks/YOUR_WEBHOOK_URL
+discord_webhook: https://discord.com/api/webhooks/1489997020205678633/3o8pFaSw5qfCzq2v9nl0pRgUe33lLAErW12mu4HwwVPTUMwwegt8HG55m5YmJdKFPV9H
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Instances
@@ -21,12 +21,18 @@ instances:
   - name: Radarr
     type: radarr
     url: http://192.168.1.200:7878            # or http://192.168.1.x:7878
-    api_key: YOUR_API_KEY
+    api_key: cf98a49b5a7c40588cc1dc79cb974d94
     count: 1                                  # how many movies to search per run
     tag_name: checked                         # tag applied after a search is triggered
     ignore_tag: upgr-ignore                   # movies with this tag are always skipped (optional)
     unattended: true                          # if true, clears tags when all items are processed
                                               # so the cycle starts over automatically
+    reset_when_blocked: true                  # when unattended and nothing is left to search, clear
+                                              # all tags and start a fresh cycle. Set to false to defer
+                                              # the reset while untagged Sonarr seasons are still below
+                                              # the monitored threshold (they may become eligible later
+                                              # as more episodes air/are monitored). For Radarr this
+                                              # has no practical effect. (default: true)
     wait_for_commands: false                  # if true, the script waits (concurrently) for each
                                               # Arr search command to finish before tagging the item;
                                               # rarely needed — Arr queues the search internally the
@@ -46,11 +52,12 @@ instances:
   - name: Sonarr
     type: sonarr
     url: http://192.168.1.200:8989
-    api_key: YOUR_API_KEY
+    api_key: 79d5d75880f6426c970cd7baa12a6ac2
     count: 3                                  # how many series to search per run
     tag_name: checked
     ignore_tag: upgr-ignore
     unattended: true
+    reset_when_blocked: true                  # see Radarr instance above for full explanation
     season_monitored_threshold: 50            # skip seasons where fewer than this % of
                                               # episodes are monitored (0–100, default 1)
     wait_for_commands: false                  # see Radarr instance above for full explanation
